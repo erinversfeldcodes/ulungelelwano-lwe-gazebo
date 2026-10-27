@@ -18,5 +18,33 @@ services:
       timeout: 5s
       retries: 10
 
+  # S3-compatible storage for uploaded card images — Tigris in prod/preview,
+  # Garage (by Deuxfleurs — non-commercial, AGPL, no account needed) here
+  # so the whole stack stays Docker-emulatable locally too. Two earlier
+  # choices for this didn't survive contact with 2026: MinIO's images were
+  # deleted from Docker Hub/Quay outright in September, and LocalStack
+  # folded its free image into an account-gated one in March.
+  # Needs a one-time cluster bootstrap before it'll serve requests — the
+  # image has no shell to script that inside a container, so it's a `just`
+  # recipe run from the host instead; see `just storage-init`.
+  garage:
+    image: dxflrs/garage:v2.5.0
+    restart: unless-stopped
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    ports:
+      - "3900:3900" # S3 API
+      - "3902:3902" # website (public read of uploaded card images)
+      - "3903:3903" # admin API (used by `just storage-init`)
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres-data:
+  garage-meta:
+  garage-data:

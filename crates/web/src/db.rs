@@ -1,7 +1,10 @@
 #![cfg(feature = "ssr")]
+// These just propagate sqlx::Error as-is; there's nothing to document
+// beyond what sqlx::Result already says.
+#![allow(clippy::missing_errors_doc)]
 
-use domain::srs::ReviewState;
-use sqlx::PgPool;
+use domain::srs::{Grade, ReviewState};
+use sqlx::{PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -13,18 +16,110 @@ pub struct CardRow {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct DueCardRow {
+pub struct DeckRow {
     pub id: Uuid,
-    pub image_url: Option<String>,
-    pub target_text: String,
+    pub name: String,
 }
 
-pub async fn list_cards(pool: &PgPool) -> sqlx::Result<Vec<CardRow>> {
-    sqlx::query_as::<_, CardRow>(
-        "SELECT id, image_url, target_text FROM cards ORDER BY created_at DESC",
-    )
-    .fetch_all(pool)
-    .await
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewOrder {
+    DueDate,
+    Random,
+    HardestFirst,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReviewQueue {
+    pub cards: Vec<CardRow>,
+    pub due_review_count: i64,
+    pub new_available_today: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct HardCardRow {
+    pub id: Uuid,
+    pub target_text: String,
+    pub difficulty: f32,
+    pub lapses: i32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UserStats {
+    pub total_cards: i64,
+    pub due_now: i64,
+    pub reviews_today: i64,
+    pub current_streak_days: i64,
+    pub hardest_cards: Vec<HardCardRow>,
+}
+
+// --- cards --------------------------------------------------------------
+
+pub async fn list_cards(
+    pool: &PgPool,
+    tag: Option<&str>,
+    deck_id: Option<Uuid>,
+) -> sqlx::Result<Vec<CardRow>> {
+    match (tag, deck_id) {
+        (None, None) => {
+            sqlx::query_as(
+                "SELECT c.id, c.image_url, c.target_text FROM cards c ORDER BY c.created_at DESC",
+            )
+            .fetch_all(pool)
+            .await
+        }
+        (Some(tag), None) => {
+            sqlx::query_as(
+                "SELECT c.id, c.image_url, c.target_text FROM cards c \
+                 JOIN card_tags t ON t.card_id = c.id AND t.tag = $1 \
+                 ORDER BY c.created_at DESC",
+            )
+            .bind(tag)
+            .fetch_all(pool)
+            .await
+        }
+        (None, Some(deck_id)) => {
+            sqlx::query_as(
+                "SELECT c.id, c.image_url, c.target_text FROM cards c \
+                 JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $1 \
+                 ORDER BY c.created_at DESC",
+            )
+            .bind(deck_id)
+            .fetch_all(pool)
+            .await
+        }
+        (Some(tag), Some(deck_id)) => {
+            sqlx::query_as(
+                "SELECT c.id, c.image_url, c.target_text FROM cards c \
+                 JOIN card_tags t ON t.card_id = c.id AND t.tag = $1 \
+                 JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $2 \
+                 ORDER BY c.created_at DESC",
+            )
+            .bind(tag)
+            .bind(deck_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+}
+
+pub async fn list_tags(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar("SELECT DISTINCT tag FROM card_tags ORDER BY tag")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn get_card(pool: &PgPool, card_id: Uuid) -> sqlx::Result<Option<CardRow>> {
+    sqlx::query_as("SELECT id, image_url, target_text FROM cards WHERE id = $1")
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn card_tags(pool: &PgPool, card_id: Uuid) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar("SELECT tag FROM card_tags WHERE card_id = $1 ORDER BY tag")
+        .bind(card_id)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn create_card(
@@ -46,39 +141,125 @@ pub async fn create_card(
     .fetch_one(&mut *tx)
     .await?;
 
-    for tag in tags {
-        sqlx::query("INSERT INTO card_tags (card_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(id)
-            .bind(tag)
-            .execute(&mut *tx)
-            .await?;
-    }
-
+    set_card_tags_in_tx(&mut tx, id, tags).await?;
     tx.commit().await?;
     Ok(id)
 }
 
-/// Cards due for review: either never reviewed by this user, or past due.
-pub async fn due_cards(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<DueCardRow>> {
-    sqlx::query_as::<_, DueCardRow>(
-        "SELECT c.id, c.image_url, c.target_text \
-         FROM cards c \
-         LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
-         WHERE rs.due_at IS NULL OR rs.due_at <= now() \
-         ORDER BY rs.due_at NULLS FIRST",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
+pub async fn update_card(
+    pool: &PgPool,
+    card_id: Uuid,
+    image_url: &str,
+    target_text: &str,
+    tags: &[String],
+) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("UPDATE cards SET image_url = $1, target_text = $2 WHERE id = $3")
+        .bind(image_url)
+        .bind(target_text)
+        .bind(card_id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("DELETE FROM card_tags WHERE card_id = $1")
+        .bind(card_id)
+        .execute(&mut *tx)
+        .await?;
+    set_card_tags_in_tx(&mut tx, card_id, tags).await?;
+
+    tx.commit().await?;
+    Ok(())
 }
+
+async fn set_card_tags_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    card_id: Uuid,
+    tags: &[String],
+) -> sqlx::Result<()> {
+    for tag in tags {
+        sqlx::query("INSERT INTO card_tags (card_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(card_id)
+            .bind(tag)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn delete_card(pool: &PgPool, card_id: Uuid) -> sqlx::Result<()> {
+    // card_tags, deck_cards, and review_state all cascade on cards.id.
+    sqlx::query("DELETE FROM cards WHERE id = $1")
+        .bind(card_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// --- decks ----------------------------------------------------------------
+
+pub async fn create_deck(pool: &PgPool, created_by: Uuid, name: &str) -> sqlx::Result<Uuid> {
+    sqlx::query_scalar("INSERT INTO decks (name, created_by) VALUES ($1, $2) RETURNING id")
+        .bind(name)
+        .bind(created_by)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn list_decks(pool: &PgPool) -> sqlx::Result<Vec<DeckRow>> {
+    sqlx::query_as("SELECT id, name FROM decks ORDER BY name")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn add_card_to_deck(pool: &PgPool, deck_id: Uuid, card_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("INSERT INTO deck_cards (deck_id, card_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(deck_id)
+        .bind(card_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn remove_card_from_deck(
+    pool: &PgPool,
+    deck_id: Uuid,
+    card_id: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM deck_cards WHERE deck_id = $1 AND card_id = $2")
+        .bind(deck_id)
+        .bind(card_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn card_deck_ids(pool: &PgPool, card_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar("SELECT deck_id FROM deck_cards WHERE card_id = $1")
+        .bind(card_id)
+        .fetch_all(pool)
+        .await
+}
+
+// --- review state / scheduling ---------------------------------------------
+
+type ReviewStateRow = (Option<f32>, Option<f32>, f32, i32, i32);
+type ReviewStateWithLastReviewedRow = (
+    Option<f32>,
+    Option<f32>,
+    f32,
+    i32,
+    i32,
+    Option<OffsetDateTime>,
+);
 
 pub async fn get_review_state(
     pool: &PgPool,
     user_id: Uuid,
     card_id: Uuid,
 ) -> sqlx::Result<ReviewState> {
-    let row: Option<(f32, f32, i32)> = sqlx::query_as(
-        "SELECT ease_factor, interval_days, repetitions FROM review_state \
+    let row: Option<ReviewStateRow> = sqlx::query_as(
+        "SELECT stability, difficulty, interval_days, repetitions, lapses FROM review_state \
          WHERE user_id = $1 AND card_id = $2",
     )
     .bind(user_id)
@@ -87,42 +268,639 @@ pub async fn get_review_state(
     .await?;
 
     Ok(match row {
-        Some((ease_factor, interval_days, repetitions)) => ReviewState {
-            ease_factor,
+        Some((stability, difficulty, interval_days, repetitions, lapses)) => ReviewState {
+            stability,
+            difficulty,
             interval_days,
-            repetitions: repetitions as u32,
+            repetitions: repetitions.cast_unsigned(),
+            lapses: lapses.cast_unsigned(),
         },
         None => ReviewState::default(),
     })
 }
 
-pub async fn save_review_state(
+/// Schedules `card_id`'s next review for `user_id` and logs the grading
+/// event, atomically. Returns the resulting state (useful for tests and
+/// for any caller that wants to show the user what just happened).
+pub async fn record_review(
     pool: &PgPool,
     user_id: Uuid,
     card_id: Uuid,
-    state: ReviewState,
-) -> sqlx::Result<()> {
-    let due_at = OffsetDateTime::now_utc()
-        + time::Duration::seconds((state.interval_days * 86_400.0) as i64);
+    grade: Grade,
+) -> sqlx::Result<ReviewState> {
+    // Fetched alongside last_reviewed_at (rather than via get_review_state)
+    // because FSRS needs actual elapsed time since the last review, not
+    // just the stored state — a card reviewed late schedules differently
+    // than one reviewed exactly on time.
+    let row: Option<ReviewStateWithLastReviewedRow> = sqlx::query_as(
+        "SELECT stability, difficulty, interval_days, repetitions, lapses, last_reviewed_at \
+             FROM review_state WHERE user_id = $1 AND card_id = $2",
+    )
+    .bind(user_id)
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await?;
 
+    let (current, last_reviewed_at) = match row {
+        Some((stability, difficulty, interval_days, repetitions, lapses, last_reviewed_at)) => (
+            ReviewState {
+                stability,
+                difficulty,
+                interval_days,
+                repetitions: repetitions.cast_unsigned(),
+                lapses: lapses.cast_unsigned(),
+            },
+            last_reviewed_at,
+        ),
+        None => (ReviewState::default(), None),
+    };
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let elapsed_days = last_reviewed_at.map_or(0, |t| {
+        (OffsetDateTime::now_utc() - t).whole_days().max(0) as u32
+    });
+
+    let next = current.schedule(grade, elapsed_days);
+
+    // Truncating fractional seconds is intentional, not accidental loss.
+    #[allow(clippy::cast_possible_truncation)]
+    let due_at =
+        OffsetDateTime::now_utc() + time::Duration::seconds((next.interval_days * 86_400.0) as i64);
+
+    let mut tx = pool.begin().await?;
+
+    // introduced_at is only ever set by the VALUES on first insert; the
+    // ON CONFLICT branch deliberately omits it, so it's never overwritten.
     sqlx::query(
-        "INSERT INTO review_state (user_id, card_id, ease_factor, interval_days, repetitions, due_at, last_reviewed_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, now()) \
+        "INSERT INTO review_state \
+            (user_id, card_id, stability, difficulty, interval_days, repetitions, lapses, due_at, last_reviewed_at, introduced_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now()) \
          ON CONFLICT (user_id, card_id) DO UPDATE SET \
-            ease_factor = EXCLUDED.ease_factor, \
+            stability = EXCLUDED.stability, \
+            difficulty = EXCLUDED.difficulty, \
             interval_days = EXCLUDED.interval_days, \
             repetitions = EXCLUDED.repetitions, \
+            lapses = EXCLUDED.lapses, \
             due_at = EXCLUDED.due_at, \
             last_reviewed_at = EXCLUDED.last_reviewed_at",
     )
     .bind(user_id)
     .bind(card_id)
-    .bind(state.ease_factor)
-    .bind(state.interval_days)
-    .bind(state.repetitions as i32)
+    .bind(next.stability)
+    .bind(next.difficulty)
+    .bind(next.interval_days)
+    .bind(next.repetitions.cast_signed())
+    .bind(next.lapses.cast_signed())
     .bind(due_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
+    sqlx::query("INSERT INTO review_log (user_id, card_id, grade) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(card_id)
+        .bind(grade_label(grade))
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(next)
+}
+
+fn grade_label(grade: Grade) -> &'static str {
+    match grade {
+        Grade::Again => "again",
+        Grade::Hard => "hard",
+        Grade::Good => "good",
+        Grade::Easy => "easy",
+    }
+}
+
+async fn due_review_cards(
+    pool: &PgPool,
+    user_id: Uuid,
+    deck_id: Option<Uuid>,
+    order: ReviewOrder,
+) -> sqlx::Result<Vec<CardRow>> {
+    // `order_clause` is one of three fixed literals selected by a closed
+    // Rust enum, never user input, so interpolating it isn't a SQL
+    // injection risk the way interpolating a value would be.
+    let order_clause = match order {
+        ReviewOrder::DueDate => "rs.due_at ASC",
+        ReviewOrder::Random => "random()",
+        // Higher FSRS difficulty means a harder card (unlike the old SM-2
+        // ease_factor, where lower meant harder), so this sorts descending.
+        ReviewOrder::HardestFirst => "rs.difficulty DESC",
+    };
+
+    if let Some(deck_id) = deck_id {
+        let sql = format!(
+            "SELECT c.id, c.image_url, c.target_text FROM cards c \
+             JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
+             JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $2 \
+             WHERE rs.due_at <= now() ORDER BY {order_clause}"
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(user_id)
+            .bind(deck_id)
+            .fetch_all(pool)
+            .await
+    } else {
+        let sql = format!(
+            "SELECT c.id, c.image_url, c.target_text FROM cards c \
+             JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
+             WHERE rs.due_at <= now() ORDER BY {order_clause}"
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+    }
+}
+
+async fn new_cards(
+    pool: &PgPool,
+    user_id: Uuid,
+    deck_id: Option<Uuid>,
+    limit: i64,
+) -> sqlx::Result<Vec<CardRow>> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+    if let Some(deck_id) = deck_id {
+        sqlx::query_as(
+            "SELECT c.id, c.image_url, c.target_text FROM cards c \
+             JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $3 \
+             LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
+             WHERE rs.card_id IS NULL ORDER BY c.created_at ASC LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit)
+        .bind(deck_id)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as(
+            "SELECT c.id, c.image_url, c.target_text FROM cards c \
+             LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
+             WHERE rs.card_id IS NULL ORDER BY c.created_at ASC LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+}
+
+async fn new_cards_introduced_today(pool: &PgPool, user_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM review_state \
+         WHERE user_id = $1 AND introduced_at::date = current_date",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn daily_new_card_limit(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<i32>> {
+    sqlx::query_scalar("SELECT daily_new_card_limit FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn set_daily_new_card_limit(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit: Option<i32>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE users SET daily_new_card_limit = $1 WHERE id = $2")
+        .bind(limit)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
     Ok(())
+}
+
+/// The cards due for review right now, plus up to the user's remaining
+/// daily allowance of never-before-seen cards. Review cards (already in
+/// the user's rotation) are never capped — only the introduction of
+/// brand-new ones is.
+pub async fn review_queue(
+    pool: &PgPool,
+    user_id: Uuid,
+    deck_id: Option<Uuid>,
+    order: ReviewOrder,
+) -> sqlx::Result<ReviewQueue> {
+    let review_cards = due_review_cards(pool, user_id, deck_id, order).await?;
+    let limit = daily_new_card_limit(pool, user_id).await?;
+    let introduced_today = new_cards_introduced_today(pool, user_id).await?;
+
+    let remaining_new = match limit {
+        Some(limit) => (i64::from(limit) - introduced_today).max(0),
+        None => 1000, // sane hard cap so an "unlimited" setting can't blow up one query
+    };
+    let new = new_cards(pool, user_id, deck_id, remaining_new).await?;
+
+    #[allow(clippy::cast_possible_wrap)] // card counts are nowhere near i64::MAX
+    let due_review_count = review_cards.len() as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let new_available_today = new.len() as i64;
+
+    let mut cards = review_cards;
+    cards.extend(new);
+
+    Ok(ReviewQueue {
+        cards,
+        due_review_count,
+        new_available_today,
+    })
+}
+
+// --- stats ------------------------------------------------------------------
+
+pub async fn user_stats(pool: &PgPool, user_id: Uuid) -> sqlx::Result<UserStats> {
+    let total_cards: i64 = sqlx::query_scalar("SELECT count(*) FROM cards")
+        .fetch_one(pool)
+        .await?;
+    let due_now: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM review_state WHERE user_id = $1 AND due_at <= now()",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    let reviews_today: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM review_log WHERE user_id = $1 AND graded_at::date = current_date",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    let current_streak_days = streak_days(pool, user_id).await?;
+    let hardest_cards = sqlx::query_as(
+        "SELECT c.id, c.target_text, rs.difficulty, rs.lapses FROM review_state rs \
+         JOIN cards c ON c.id = rs.card_id \
+         WHERE rs.user_id = $1 AND rs.lapses > 0 \
+         ORDER BY rs.lapses DESC, rs.difficulty DESC LIMIT 10",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(UserStats {
+        total_cards,
+        due_now,
+        reviews_today,
+        current_streak_days,
+        hardest_cards,
+    })
+}
+
+/// Consecutive days (ending today) with at least one review logged. Zero
+/// if nothing's been reviewed yet today, even with a long run before that
+/// — simple to reason about, at the cost of not giving credit for "still
+/// have time left today".
+async fn streak_days(pool: &PgPool, user_id: Uuid) -> sqlx::Result<i64> {
+    let days: Vec<time::Date> = sqlx::query_scalar(
+        "SELECT DISTINCT graded_at::date FROM review_log \
+         WHERE user_id = $1 ORDER BY graded_at::date DESC LIMIT 365",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut streak: i64 = 0;
+    let mut expected = OffsetDateTime::now_utc().date();
+    for day in days {
+        if day == expected {
+            streak += 1;
+            expected = expected.previous_day().unwrap_or(expected);
+        } else {
+            break;
+        }
+    }
+    Ok(streak)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_user(pool: &PgPool) -> Uuid {
+        sqlx::query_scalar("INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id")
+            .bind("db-test@example.com")
+            .bind("db-test")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn created_card_appears_in_list_with_its_tags(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(
+            &pool,
+            user_id,
+            "https://example.com/cat.jpg",
+            "gato",
+            &["animals".to_string(), "beginner".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let cards = list_cards(&pool, None, None).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, card_id);
+        assert_eq!(cards[0].target_text, "gato");
+
+        let tags = card_tags(&pool, card_id).await.unwrap();
+        assert_eq!(tags, vec!["animals".to_string(), "beginner".to_string()]);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn list_cards_filters_by_tag(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        create_card(&pool, user_id, "", "gato", &["animals".to_string()])
+            .await
+            .unwrap();
+        create_card(&pool, user_id, "", "trabajo", &["work".to_string()])
+            .await
+            .unwrap();
+
+        let animals = list_cards(&pool, Some("animals"), None).await.unwrap();
+        assert_eq!(animals.len(), 1);
+        assert_eq!(animals[0].target_text, "gato");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_card_replaces_fields_and_tags(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "old.jpg", "old", &["old-tag".to_string()])
+            .await
+            .unwrap();
+
+        update_card(&pool, card_id, "new.jpg", "new", &["new-tag".to_string()])
+            .await
+            .unwrap();
+
+        let card = get_card(&pool, card_id).await.unwrap().unwrap();
+        assert_eq!(card.target_text, "new");
+        assert_eq!(card.image_url, Some("new.jpg".to_string()));
+        assert_eq!(card_tags(&pool, card_id).await.unwrap(), vec!["new-tag"]);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn delete_card_removes_it_from_the_list(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+
+        delete_card(&pool, card_id).await.unwrap();
+
+        assert!(get_card(&pool, card_id).await.unwrap().is_none());
+        assert!(list_cards(&pool, None, None).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn deck_scopes_card_list_and_review_queue(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let in_deck = create_card(&pool, user_id, "", "in-deck", &[])
+            .await
+            .unwrap();
+        let _out_of_deck = create_card(&pool, user_id, "", "out-of-deck", &[])
+            .await
+            .unwrap();
+
+        let deck_id = create_deck(&pool, user_id, "My Deck").await.unwrap();
+        add_card_to_deck(&pool, deck_id, in_deck).await.unwrap();
+
+        let cards = list_cards(&pool, None, Some(deck_id)).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, in_deck);
+
+        let queue = review_queue(&pool, user_id, Some(deck_id), ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(queue.cards.len(), 1);
+        assert_eq!(queue.cards[0].id, in_deck);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn removing_a_card_from_a_deck_excludes_it_again(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let deck_id = create_deck(&pool, user_id, "Deck").await.unwrap();
+        add_card_to_deck(&pool, deck_id, card_id).await.unwrap();
+
+        remove_card_from_deck(&pool, deck_id, card_id)
+            .await
+            .unwrap();
+
+        assert!(
+            list_cards(&pool, None, Some(deck_id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn get_review_state_defaults_when_never_graded(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+
+        let state = get_review_state(&pool, user_id, card_id).await.unwrap();
+        assert_eq!(state, ReviewState::default());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn record_review_schedules_and_logs_in_one_go(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+
+        let next = record_review(&pool, user_id, card_id, Grade::Good)
+            .await
+            .unwrap();
+        assert_eq!(next.repetitions, 1);
+        assert!(next.interval_days >= 1.0);
+
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM review_log WHERE user_id = $1 AND card_id = $2 AND grade = 'good'",
+        )
+        .bind(user_id)
+        .bind(card_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(logged, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn record_review_upserts_rather_than_duplicates_state(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+
+        record_review(&pool, user_id, card_id, Grade::Good)
+            .await
+            .unwrap();
+        record_review(&pool, user_id, card_id, Grade::Good)
+            .await
+            .unwrap();
+
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM review_state WHERE user_id = $1 AND card_id = $2",
+        )
+        .bind(user_id)
+        .bind(card_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count, 1);
+
+        let state = get_review_state(&pool, user_id, card_id).await.unwrap();
+        assert_eq!(state.repetitions, 2);
+        // The exact FSRS-fitted interval is covered by crates/domain's
+        // own tests; this test's job is only to confirm the upsert kept
+        // one row and kept scheduling forward, not duplicated it.
+        assert!(state.interval_days >= 1.0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn grading_removes_card_from_due_review_until_its_next_interval(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+
+        // Before any review, it's a "new" card, not a "due review" one.
+        let before = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(before.due_review_count, 0);
+        assert_eq!(before.new_available_today, 1);
+
+        record_review(&pool, user_id, card_id, Grade::Good)
+            .await
+            .unwrap();
+
+        let after = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert!(
+            after.cards.is_empty(),
+            "a card just graded Good is scheduled a day out, not due again immediately"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn daily_new_card_limit_caps_how_many_new_cards_appear(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        set_daily_new_card_limit(&pool, user_id, Some(1))
+            .await
+            .unwrap();
+
+        create_card(&pool, user_id, "", "new-one", &[])
+            .await
+            .unwrap();
+        create_card(&pool, user_id, "", "new-two", &[])
+            .await
+            .unwrap();
+
+        let queue = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(
+            queue.new_available_today, 1,
+            "only 1 of the 2 new cards fits under today's limit"
+        );
+        assert_eq!(queue.cards.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn review_cards_are_not_limited_by_the_new_card_cap(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        set_daily_new_card_limit(&pool, user_id, Some(0))
+            .await
+            .unwrap(); // no new cards allowed today at all
+
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        record_review(&pool, user_id, card_id, Grade::Again)
+            .await
+            .unwrap(); // introduces it, schedules a ~10-minute relearning step
+
+        // Fast-forward past the relearning step without waiting on it.
+        sqlx::query(
+            "UPDATE review_state SET due_at = now() - interval '1 minute' \
+             WHERE user_id = $1 AND card_id = $2",
+        )
+        .bind(user_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let queue = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(
+            queue.due_review_count, 1,
+            "a card already in review isn't capped by the new-card limit"
+        );
+        assert_eq!(queue.new_available_today, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn daily_new_card_limit_counts_cards_already_introduced_today(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        set_daily_new_card_limit(&pool, user_id, Some(1))
+            .await
+            .unwrap();
+
+        let first = create_card(&pool, user_id, "", "first", &[]).await.unwrap();
+        create_card(&pool, user_id, "", "second", &[])
+            .await
+            .unwrap();
+
+        record_review(&pool, user_id, first, Grade::Good)
+            .await
+            .unwrap();
+
+        let queue = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(
+            queue.new_available_today, 0,
+            "today's one new-card slot was already used"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn relapsing_counts_as_a_lapse_and_is_visible_in_stats(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "hard-word", &[])
+            .await
+            .unwrap();
+
+        record_review(&pool, user_id, card_id, Grade::Good)
+            .await
+            .unwrap();
+        record_review(&pool, user_id, card_id, Grade::Again)
+            .await
+            .unwrap();
+
+        let stats = user_stats(&pool, user_id).await.unwrap();
+        assert_eq!(stats.hardest_cards.len(), 1);
+        assert_eq!(stats.hardest_cards[0].id, card_id);
+        assert_eq!(stats.hardest_cards[0].lapses, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn user_stats_counts_reviews_logged_today(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let a = create_card(&pool, user_id, "", "a", &[]).await.unwrap();
+        let b = create_card(&pool, user_id, "", "b", &[]).await.unwrap();
+
+        record_review(&pool, user_id, a, Grade::Good).await.unwrap();
+        record_review(&pool, user_id, b, Grade::Easy).await.unwrap();
+
+        let stats = user_stats(&pool, user_id).await.unwrap();
+        assert_eq!(stats.reviews_today, 2);
+        assert_eq!(stats.current_streak_days, 1);
+        assert_eq!(stats.total_cards, 2);
+    }
 }

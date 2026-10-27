@@ -1,4 +1,7 @@
 #![cfg(feature = "ssr")]
+// Error messages here are already the full user-facing explanation; an
+// `# Errors` doc section would just restate them.
+#![allow(clippy::missing_errors_doc)]
 
 use rand::RngExt;
 use sqlx::PgPool;
@@ -21,8 +24,14 @@ pub struct UserRow {
 }
 
 fn generate_token() -> String {
+    use std::fmt::Write as _;
+
     let bytes: [u8; 32] = rand::rng().random();
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(token, "{b:02x}").unwrap();
+    }
+    token
 }
 
 /// Starts a sign-in attempt: mints a single-use token and emails a magic
@@ -100,17 +109,16 @@ pub async fn verify_login_token(pool: &PgPool, token: &str) -> Result<String, St
         .await
         .map_err(|e| e.to_string())?;
 
-    let user_id = match user_id {
-        Some(id) => id,
-        None => {
-            let default_name = email.split('@').next().unwrap_or(&email).to_string();
-            sqlx::query_scalar("INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id")
-                .bind(&email)
-                .bind(default_name)
-                .fetch_one(pool)
-                .await
-                .map_err(|e| e.to_string())?
-        }
+    let user_id = if let Some(id) = user_id {
+        id
+    } else {
+        let default_name = email.split('@').next().unwrap_or(&email).to_string();
+        sqlx::query_scalar("INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind(default_name)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?
     };
 
     let session_token = generate_token();
@@ -161,4 +169,128 @@ pub async fn require_user(
     current_user(pool, cookies)
         .await
         .ok_or_else(|| "not signed in".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn token_for(pool: &PgPool, email: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT token FROM login_tokens WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(email)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn new_signup_creates_user_with_name_from_email(pool: PgPool) {
+        let sender = crate::email::EmailSender::Console;
+        request_magic_link(&pool, &sender, "http://localhost:3000", "New@Example.com")
+            .await
+            .unwrap();
+
+        let token = token_for(&pool, "new@example.com").await;
+        let session_token = verify_login_token(&pool, &token).await.unwrap();
+
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+        assert_eq!(user.email, "new@example.com", "email should be lowercased");
+        assert_eq!(user.name, "new");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn token_cannot_be_redeemed_twice(pool: PgPool) {
+        let sender = crate::email::EmailSender::Console;
+        request_magic_link(&pool, &sender, "http://localhost:3000", "reuse@example.com")
+            .await
+            .unwrap();
+        let token = token_for(&pool, "reuse@example.com").await;
+
+        verify_login_token(&pool, &token).await.unwrap();
+        let second_attempt = verify_login_token(&pool, &token).await;
+        assert!(second_attempt.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn expired_token_is_rejected(pool: PgPool) {
+        let token = "already-expired-token";
+        sqlx::query(
+            "INSERT INTO login_tokens (token, email, user_id, expires_at) \
+             VALUES ($1, $2, NULL, now() - interval '1 hour')",
+        )
+        .bind(token)
+        .bind("expired@example.com")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = verify_login_token(&pool, token).await;
+        assert!(result.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn unknown_token_is_rejected(pool: PgPool) {
+        let result = verify_login_token(&pool, "never-issued").await;
+        assert!(result.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn fifth_new_signup_is_rejected_once_at_the_cap(pool: PgPool) {
+        let sender = crate::email::EmailSender::Console;
+        for i in 0..MAX_USERS {
+            let email = format!("user{i}@example.com");
+            request_magic_link(&pool, &sender, "http://localhost:3000", &email)
+                .await
+                .unwrap_or_else(|e| panic!("user {i} should be allowed to sign up: {e}"));
+            let token = token_for(&pool, &email).await;
+            verify_login_token(&pool, &token).await.unwrap();
+        }
+
+        let fifth =
+            request_magic_link(&pool, &sender, "http://localhost:3000", "user4@example.com").await;
+        assert!(
+            fifth.is_err(),
+            "a 5th new signup should be rejected at the cap"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn existing_user_can_still_sign_in_at_the_cap(pool: PgPool) {
+        let sender = crate::email::EmailSender::Console;
+        let mut emails = Vec::new();
+        for i in 0..MAX_USERS {
+            let email = format!("user{i}@example.com");
+            request_magic_link(&pool, &sender, "http://localhost:3000", &email)
+                .await
+                .unwrap();
+            let token = token_for(&pool, &email).await;
+            verify_login_token(&pool, &token).await.unwrap();
+            emails.push(email);
+        }
+
+        // At the cap now — an *existing* user should still be able to sign in again.
+        let result = request_magic_link(&pool, &sender, "http://localhost:3000", &emails[0]).await;
+        assert!(result.is_ok());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn deleted_session_no_longer_resolves_to_a_user(pool: PgPool) {
+        let sender = crate::email::EmailSender::Console;
+        request_magic_link(
+            &pool,
+            &sender,
+            "http://localhost:3000",
+            "logout@example.com",
+        )
+        .await
+        .unwrap();
+        let token = token_for(&pool, "logout@example.com").await;
+        let session_token = verify_login_token(&pool, &token).await.unwrap();
+
+        assert!(user_for_session(&pool, &session_token).await.is_some());
+        delete_session(&pool, &session_token).await;
+        assert!(user_for_session(&pool, &session_token).await.is_none());
+    }
 }

@@ -24,13 +24,31 @@ jobs:
       # web's ssr and hydrate halves are mutually exclusive features that
       # each only compile for one target (native vs wasm32), so each needs
       # its own pass.
-      - run: cargo clippy --workspace --all-targets --features web/ssr -- -D warnings
-      - run: cargo clippy -p web --no-default-features --features hydrate --target wasm32-unknown-unknown --lib -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features web/ssr -- -W clippy::pedantic -D warnings
+      - run: cargo clippy -p web --no-default-features --features hydrate --target wasm32-unknown-unknown --lib -- -W clippy::pedantic -D warnings
 
   test:
     name: test
     needs: check
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # sqlx::test needs CREATEDB privilege to spin up a fresh database per
+      # test; the default role from the postgres image already has it.
+      DATABASE_URL: postgres://app:app@localhost:5432/app
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

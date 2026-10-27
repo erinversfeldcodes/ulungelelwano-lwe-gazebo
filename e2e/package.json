@@ -1,0 +1,12 @@
+{
+  "name": "gazebo-e2e",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "pg": "^8.13.0"
+  }
+}

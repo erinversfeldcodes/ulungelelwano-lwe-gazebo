@@ -7,6 +7,7 @@ pub struct AppState {
     pub leptos_options: LeptosOptions,
     pub db_pool: sqlx::PgPool,
     pub email_sender: crate::email::EmailSender,
+    pub storage: Option<crate::storage::Storage>,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {

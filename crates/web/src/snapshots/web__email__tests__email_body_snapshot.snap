@@ -1,0 +1,6 @@
+---
+source: crates/web/src/email.rs
+assertion_line: 129
+expression: TEST_EMAIL_HTML
+---
+<p>Automated deployment check for Gazebo — nothing to do here.</p>

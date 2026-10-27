@@ -14,10 +14,10 @@ path = "src/main.rs"
 required-features = ["ssr"]
 
 [dependencies]
-axum = { version = "0.8.9", optional = true }
+axum = { version = "0.8.9", optional = true, features = ["multipart"] }
 console_error_panic_hook = { version = "0.1.7", optional = true }
 console_log = { version = "1.1.0", optional = true }
-domain = { path = "../domain" }
+domain = { path = "../domain", optional = true }
 env_logger = { version = "0.11.11", optional = true }
 leptos = "0.8.22"
 leptos_axum = { version = "0.8.10", optional = true }
@@ -26,9 +26,10 @@ leptos_router = "0.8.17"
 log = "0.4.34"
 rand = { version = "0.10.3", optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"], optional = true }
+s3 = { version = "0.1.38", default-features = false, optional = true, features = ["async", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", optional = true }
-sqlx = { version = "0.9.0", default-features = false, features = ["macros", "postgres", "runtime-tokio", "time", "tls-rustls", "uuid"], optional = true }
+sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "time", "tls-rustls", "uuid"], optional = true }
 time = { version = "0.3.55", features = ["serde"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"], optional = true }
 tower-cookies = { version = "0.11.0", optional = true }
@@ -50,10 +51,16 @@ ssr = [
     "dep:serde_json",
     "dep:tower-cookies",
     "dep:env_logger",
+    "dep:s3",
+    "dep:domain",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",
 ]
+
+[dev-dependencies]
+insta = "1.49.0"
+wiremock = "0.6.5"
 
 [package.metadata.leptos]
 output-name = "web"
