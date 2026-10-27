@@ -1,0 +1,172 @@
+use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Card {
+    pub id: Uuid,
+    pub image_url: Option<String>,
+    pub target_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardDetail {
+    pub id: Uuid,
+    pub image_url: Option<String>,
+    pub target_text: String,
+    pub tags: Vec<String>,
+    pub deck_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewQueueView {
+    pub cards: Vec<Card>,
+    pub due_review_count: i64,
+    pub new_available_today: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum GradeInput {
+    Again,
+    Hard,
+    Good,
+    Easy,
+}
+
+#[cfg(feature = "ssr")]
+impl From<GradeInput> for domain::srs::Grade {
+    fn from(grade: GradeInput) -> Self {
+        match grade {
+            GradeInput::Again => domain::srs::Grade::Again,
+            GradeInput::Hard => domain::srs::Grade::Hard,
+            GradeInput::Good => domain::srs::Grade::Good,
+            GradeInput::Easy => domain::srs::Grade::Easy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReviewOrderInput {
+    DueDate,
+    Random,
+    HardestFirst,
+}
+
+#[cfg(feature = "ssr")]
+impl From<ReviewOrderInput> for crate::db::ReviewOrder {
+    fn from(order: ReviewOrderInput) -> Self {
+        match order {
+            ReviewOrderInput::DueDate => crate::db::ReviewOrder::DueDate,
+            ReviewOrderInput::Random => crate::db::ReviewOrder::Random,
+            ReviewOrderInput::HardestFirst => crate::db::ReviewOrder::HardestFirst,
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+async fn require_user() -> Result<crate::auth::UserRow, ServerFnError> {
+    let state = expect_context::<crate::state::AppState>();
+    let cookies = leptos_axum::extract::<tower_cookies::Cookies>()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    crate::auth::require_user(&state.db_pool, &cookies)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+#[server]
+pub async fn list_cards(
+    tag: Option<String>,
+    deck_id: Option<Uuid>,
+) -> Result<Vec<Card>, ServerFnError> {
+    // Browsing the shared card pool is public; only mutating it needs auth.
+    let state = expect_context::<crate::state::AppState>();
+    let rows = crate::db::list_cards(&state.db_pool, tag.as_deref(), deck_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Card {
+            id: r.id,
+            image_url: r.image_url,
+            target_text: r.target_text,
+        })
+        .collect())
+}
+
+#[server]
+pub async fn list_tags() -> Result<Vec<String>, ServerFnError> {
+    let state = expect_context::<crate::state::AppState>();
+    crate::db::list_tags(&state.db_pool)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+#[server]
+pub async fn get_card(card_id: Uuid) -> Result<Option<CardDetail>, ServerFnError> {
+    let state = expect_context::<crate::state::AppState>();
+    let Some(card) = crate::db::get_card(&state.db_pool, card_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let tags = crate::db::card_tags(&state.db_pool, card_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let deck_ids = crate::db::card_deck_ids(&state.db_pool, card_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(Some(CardDetail {
+        id: card.id,
+        image_url: card.image_url,
+        target_text: card.target_text,
+        tags,
+        deck_ids,
+    }))
+}
+
+#[server]
+pub async fn delete_card(card_id: Uuid) -> Result<(), ServerFnError> {
+    require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::db::delete_card(&state.db_pool, card_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(())
+}
+
+#[server]
+pub async fn review_queue(
+    deck_id: Option<Uuid>,
+    order: ReviewOrderInput,
+) -> Result<ReviewQueueView, ServerFnError> {
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    let queue = crate::db::review_queue(&state.db_pool, user.id, deck_id, order.into())
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(ReviewQueueView {
+        cards: queue
+            .cards
+            .into_iter()
+            .map(|r| Card {
+                id: r.id,
+                image_url: r.image_url,
+                target_text: r.target_text,
+            })
+            .collect(),
+        due_review_count: queue.due_review_count,
+        new_available_today: queue.new_available_today,
+    })
+}
+
+#[server]
+pub async fn grade_card(card_id: Uuid, grade: GradeInput) -> Result<(), ServerFnError> {
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::db::record_review(&state.db_pool, user.id, card_id, grade.into())
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(())
+}

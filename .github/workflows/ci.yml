@@ -24,13 +24,31 @@ jobs:
       # web's ssr and hydrate halves are mutually exclusive features that
       # each only compile for one target (native vs wasm32), so each needs
       # its own pass.
-      - run: cargo clippy --workspace --all-targets --features web/ssr -- -D warnings
-      - run: cargo clippy -p web --no-default-features --features hydrate --target wasm32-unknown-unknown --lib -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features web/ssr -- -W clippy::pedantic -D warnings
+      - run: cargo clippy -p web --no-default-features --features hydrate --target wasm32-unknown-unknown --lib -- -W clippy::pedantic -D warnings
 
   test:
     name: test
     needs: check
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # sqlx::test needs CREATEDB privilege to spin up a fresh database per
+      # test; the default role from the postgres image already has it.
+      DATABASE_URL: postgres://app:app@localhost:5432/app
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -42,3 +60,82 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --features web/ssr
+
+  # Runs the real Playwright suite against a fully local, ephemeral instance
+  # of the app (own Postgres service, no Resend/Tigris configured — email
+  # falls back to Console mode and image upload is skipped, same graceful
+  # degradation local dev already relies on). Deliberately NOT run against
+  # production: cards/decks are a single shared, unscoped pool with no
+  # per-tenant isolation, so e2e-created fixtures would show up in the real
+  # four users' review queues. Preview apps (see preview.yml) separately get
+  # e2e run against the real deployed artifact, each on its own Neon branch.
+  e2e:
+    name: E2E (local)
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://app:app@localhost:5432/app
+      BASE_URL: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli,cargo-leptos
+      - run: sqlx migrate run --source migrations
+      - run: cargo leptos build
+      - name: Start the app in the background
+        run: ./target/debug/web &
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
+      - name: Install E2E deps and Playwright browsers
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Wait for local server to be ready
+        run: |
+          for _ in $(seq 1 20); do
+            if curl -sf --max-time 5 "${BASE_URL}/health" >/dev/null 2>&1; then
+              echo "server is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::local server never became ready"
+          exit 1
+      - name: Run E2E suite
+        working-directory: e2e
+        run: npx playwright test
+      - name: Upload Playwright traces (failures only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-ci
+          path: e2e/test-results/
+          retention-days: 14

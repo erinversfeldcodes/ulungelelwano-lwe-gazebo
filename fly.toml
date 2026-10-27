@@ -13,6 +13,18 @@ auto_stop_machines = "stop"
 auto_start_machines = true
 min_machines_running = 0
 
+# DB-aware, not bare liveness: a machine that's up but can't reach Postgres
+# should get restarted rather than keep eating traffic. Fly's internal
+# checks hit internal_port directly, bypassing force_https, so this isn't
+# affected by it. Health checks don't themselves count as traffic, so this
+# doesn't fight auto_stop_machines/min_machines_running = 0.
+[[http_service.checks]]
+interval = "15s"
+timeout = "5s"
+grace_period = "10s"
+method = "GET"
+path = "/health"
+
 [[vm]]
 size = "shared-cpu-1x"
 memory = "256mb"

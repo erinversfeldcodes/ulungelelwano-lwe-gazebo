@@ -15,6 +15,9 @@ jobs:
     name: Deploy to Fly (production)
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://gazebo.fly.dev
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,3 +26,11 @@ jobs:
       - run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Verify email delivery works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            https://gazebo.fly.dev/internal/email-check
+      - name: Verify storage upload works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            https://gazebo.fly.dev/internal/storage-check

@@ -1,5 +1,9 @@
 # --- Builder ---------------------------------------------------------------
-FROM rust:1 AS builder
+# Pinned to the same Debian release as the runtime stage below: the plain
+# `rust:1` tag floats to whatever Debian release is currently latest (it
+# recently moved to trixie), so a binary built there can need a newer glibc
+# than debian:bookworm-slim ships, crash-looping the container on every boot.
+FROM rust:1-bookworm AS builder
 
 # Toolchain/tool install is its own layer so it stays cached across deploys —
 # it doesn't change anywhere near as often as the app source below does.

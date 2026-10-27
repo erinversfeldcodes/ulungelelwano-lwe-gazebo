@@ -30,19 +30,130 @@ jobs:
     if: github.event.action != 'closed'
     needs: neon-branch
     runs-on: ubuntu-latest
-    environment:
-      name: pr-${{ github.event.number }}
-      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Fork a per-PR image bucket and scope a key to it
+        id: storage
+        env:
+          TIGRIS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_CI_ACCESS_KEY_ID }}
+          TIGRIS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_CI_SECRET_ACCESS_KEY }}
+        run: |
+          npm install -g @tigrisdata/cli
+          # --endpoint must be passed explicitly: in CI's non-interactive
+          # shell the CLI refuses to fall back to its documented default
+          # (https://t3.storage.dev) and errors instead of using it.
+          tigris configure --access-key "$TIGRIS_ACCESS_KEY_ID" --access-secret "$TIGRIS_SECRET_ACCESS_KEY" --endpoint https://t3.storage.dev
+
+          BUCKET="gazebo-cards-pr-${{ github.event.number }}"
+          # Idempotent: a `synchronize` re-run on the same PR may find the
+          # fork from an earlier push already exists.
+          if ! tigris buckets get "$BUCKET" >/dev/null 2>&1; then
+            tigris buckets create "$BUCKET" --fork-of gazebo-cards --access public --yes
+          fi
+
+          # Access-key secrets are shown only once at creation, so there's
+          # nothing to reuse across pushes — drop any key from a previous
+          # push on this PR and mint a fresh one scoped to just this bucket.
+          KEY_NAME="gazebo-pr-${{ github.event.number }}"
+          EXISTING_KEY_ID="$(tigris access-keys list --json | jq -r --arg n "$KEY_NAME" '.items[] | select(.name==$n) | .id')"
+          if [[ -n "$EXISTING_KEY_ID" ]]; then
+            tigris access-keys delete "$EXISTING_KEY_ID" --yes
+          fi
+          eval "$(tigris access-keys create "$KEY_NAME" --bucket "$BUCKET" --role Editor --export --for aws)"
+          echo "::add-mask::$AWS_ACCESS_KEY_ID"
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
+          {
+            echo "S3_ACCESS_KEY=$AWS_ACCESS_KEY_ID"
+            echo "S3_SECRET_KEY=$AWS_SECRET_ACCESS_KEY"
+          } >> "$GITHUB_ENV"
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
       - name: Deploy preview app
         id: deploy
         uses: superfly/fly-pr-review-apps@main
         with:
           name: gazebo-pr-${{ github.event.number }}
-          secrets: DATABASE_URL=${{ needs.neon-branch.outputs.db_url }}
+          secrets: >
+            DATABASE_URL=${{ needs.neon-branch.outputs.db_url }}
+            RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
+            TEST_EMAIL_RECIPIENT=${{ vars.TEST_EMAIL_RECIPIENT }}
+            APP_BASE_URL=https://gazebo-pr-${{ github.event.number }}.fly.dev
+            INTERNAL_CHECK_TOKEN=${{ secrets.INTERNAL_CHECK_TOKEN }}
+            S3_BUCKET=${{ steps.storage.outputs.bucket }}
+            S3_ENDPOINT=https://t3.storage.dev
+            S3_ACCESS_KEY=${{ env.S3_ACCESS_KEY }}
+            S3_SECRET_KEY=${{ env.S3_SECRET_KEY }}
+            S3_PUBLIC_URL=https://${{ steps.storage.outputs.bucket }}.t3.tigrisfiles.io
+            S3_REGION=auto
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Set EMAIL_FROM (may contain spaces, which the deploy action's secrets parser can't handle)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl secrets set --app "gazebo-pr-${{ github.event.number }}" \
+            "EMAIL_FROM=${{ vars.EMAIL_FROM }}"
+      - name: Verify email delivery works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/email-check"
+      - name: Verify storage upload works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/storage-check"
+
+  e2e:
+    name: Run E2E suite against preview
+    if: github.event.action != 'closed'
+    needs: [neon-branch, deploy-preview]
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: https://gazebo-pr-${{ github.event.number }}.fly.dev
+      # The preview's own Neon branch — auth.setup.ts reads the magic-link
+      # token directly from it (same trick it uses against local Postgres),
+      # bypassing the need to actually receive an email.
+      DATABASE_URL: ${{ needs.neon-branch.outputs.db_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
+      - name: Install E2E deps and Playwright browsers
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Wait for preview app to wake up
+        run: |
+          for _ in $(seq 1 20); do
+            if curl -sf --max-time 10 "${BASE_URL}/health" >/dev/null 2>&1; then
+              echo "preview app is up"
+              exit 0
+            fi
+            echo "waiting for ${BASE_URL}/health..."
+            sleep 5
+          done
+          echo "::error::preview app never became reachable at ${BASE_URL}/health"
+          exit 1
+      - name: Run E2E suite against the deployed preview
+        working-directory: e2e
+        run: npx playwright test
+      - name: Upload Playwright traces (failures only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-pr-${{ github.event.number }}
+          path: e2e/test-results/
+          retention-days: 14
 
   cleanup:
     name: Tear down preview app + Neon branch
@@ -50,6 +161,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Delete per-PR Tigris bucket and access key
+        env:
+          TIGRIS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_CI_ACCESS_KEY_ID }}
+          TIGRIS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_CI_SECRET_ACCESS_KEY }}
+        run: |
+          npm install -g @tigrisdata/cli
+          tigris configure --access-key "$TIGRIS_ACCESS_KEY_ID" --access-secret "$TIGRIS_SECRET_ACCESS_KEY" --endpoint https://t3.storage.dev
+
+          KEY_NAME="gazebo-pr-${{ github.event.number }}"
+          KEY_ID="$(tigris access-keys list --json | jq -r --arg n "$KEY_NAME" '.items[] | select(.name==$n) | .id')"
+          if [[ -n "$KEY_ID" ]]; then
+            tigris access-keys delete "$KEY_ID" --yes
+          fi
+          # `|| true`: fine if deploy-preview never ran for this PR (e.g. it
+          # was closed before its first push finished deploying).
+          tigris buckets delete "gazebo-cards-pr-${{ github.event.number }}" --yes || true
       - name: Destroy Fly preview app
         uses: superfly/fly-pr-review-apps@main
         with:
