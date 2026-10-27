@@ -38,6 +38,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Fork a per-PR image bucket and scope a key to it
         id: storage
         env:
@@ -81,7 +82,6 @@ jobs:
           secrets: >
             DATABASE_URL=${{ needs.neon-branch.outputs.db_url }}
             RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
-            EMAIL_FROM=${{ vars.EMAIL_FROM }}
             TEST_EMAIL_RECIPIENT=${{ vars.TEST_EMAIL_RECIPIENT }}
             APP_BASE_URL=https://gazebo-pr-${{ github.event.number }}.fly.dev
             INTERNAL_CHECK_TOKEN=${{ secrets.INTERNAL_CHECK_TOKEN }}
@@ -93,6 +93,12 @@ jobs:
             S3_REGION=auto
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Set EMAIL_FROM (may contain spaces, which the deploy action's secrets parser can't handle)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl secrets set --app "gazebo-pr-${{ github.event.number }}" \
+            "EMAIL_FROM=${{ vars.EMAIL_FROM }}"
       - name: Verify email delivery works
         run: |
           curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \

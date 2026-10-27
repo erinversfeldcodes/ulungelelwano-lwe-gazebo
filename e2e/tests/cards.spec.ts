@@ -81,7 +81,11 @@ test("an anonymous visitor sees a card read-only, with no edit form", async ({ p
   // origin instead.
   const absoluteCardUrl = new URL(cardUrl, page.url()).toString();
 
-  const anonContext = await browser.newContext();
+  // The "chromium" project configures a default `storageState` (the signed-in
+  // e2e user) for the `page`/`context` fixtures, and `browser.newContext()`
+  // picks that ambient state up too unless told otherwise — so without this,
+  // "anonPage" is silently signed in. Force a blank slate explicitly.
+  const anonContext = await browser.newContext({ storageState: { cookies: [], origins: [] } });
   const anonPage = await anonContext.newPage();
   try {
     await anonPage.goto(absoluteCardUrl);
