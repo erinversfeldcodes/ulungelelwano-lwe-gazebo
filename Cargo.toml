@@ -8,5 +8,4 @@ license = "UNLICENSED"
 publish = false
 
 [profile.release]
-codegen-units = 1
-lto = true
+lto = "thin"

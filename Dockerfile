@@ -8,7 +8,7 @@ RUN rustup target add wasm32-unknown-unknown \
 
 WORKDIR /app
 COPY . .
-RUN cargo leptos build --release
+RUN RUST_BACKTRACE=full cargo leptos build --release
 
 # --- Runtime -----------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
