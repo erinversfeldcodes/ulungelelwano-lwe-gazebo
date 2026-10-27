@@ -23,6 +23,21 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      # These four are tracked as GitHub secrets/variables and can be
+      # rotated there independently of what's actually stored on the Fly
+      # app — unlike `fly-pr-review-apps` (used for preview deploys), a
+      # bare `flyctl deploy` never pushes secrets, so a rotation here would
+      # otherwise silently go stale on the app until someone notices the
+      # post-deploy checks below start failing.
+      - name: Sync secrets that are tracked in GitHub
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl secrets set --app gazebo \
+            "RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}" \
+            "TEST_EMAIL_RECIPIENT=${{ vars.TEST_EMAIL_RECIPIENT }}" \
+            "INTERNAL_CHECK_TOKEN=${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            "EMAIL_FROM=${{ vars.EMAIL_FROM }}"
       - run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

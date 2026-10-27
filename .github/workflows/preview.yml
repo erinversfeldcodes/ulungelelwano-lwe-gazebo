@@ -94,8 +94,20 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          flyctl secrets set --app "gazebo-pr-${{ github.event.number }}" \
-            "EMAIL_FROM=${{ vars.EMAIL_FROM }}"
+          # The deploy action reporting success doesn't guarantee Fly's
+          # control plane has finished replacing the machine for that
+          # deploy yet — hitting this right after can race it and fail
+          # with "machine is replacing: concurrent update in progress".
+          # Harmless to retry: setting the same secret again is idempotent.
+          for attempt in 1 2 3 4 5; do
+            if flyctl secrets set --app "gazebo-pr-${{ github.event.number }}" \
+              "EMAIL_FROM=${{ vars.EMAIL_FROM }}"; then
+              exit 0
+            fi
+            echo "attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          exit 1
       - name: Verify email delivery works
         run: |
           curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
