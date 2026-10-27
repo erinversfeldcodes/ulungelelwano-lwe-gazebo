@@ -158,7 +158,7 @@ fn CardListPage() -> impl IntoView {
                 match cards.await {
                     Ok(cards) if cards.is_empty() => view! { <p>"No cards match."</p> }.into_any(),
                     Ok(cards) => view! {
-                        <ul>
+                        <ul class="card-grid">
                             {cards
                                 .into_iter()
                                 .map(|card| {
@@ -167,7 +167,7 @@ fn CardListPage() -> impl IntoView {
                                         <li>
                                             {card
                                                 .image_url
-                                                .map(|url| view! { <img src=url width="80" alt="" /> })}
+                                                .map(|url| view! { <img src=url alt="" /> })}
                                             <span>{card.target_text}</span>
                                             " "
                                             <A href=edit_href>"Edit"</A>
@@ -256,7 +256,7 @@ fn EditCardPage() -> impl IntoView {
                         let image_view = detail
                             .image_url
                             .clone()
-                            .map(|url| view! { <img src=url width="200" alt="" /> });
+                            .map(|url| view! { <img src=url alt="" /> });
                         let deck_ids = detail.deck_ids.clone();
 
                         // Anyone can view a card; only a signed-in user sees
@@ -353,8 +353,10 @@ fn EditCardPage() -> impl IntoView {
                         });
 
                         view! {
-                            {image_view}
-                            {read_only_info}
+                            <div class="review-card">
+                                {image_view}
+                                {read_only_info}
+                            </div>
                             {edit_form}
                             {deck_section}
                             {delete_form}
@@ -404,7 +406,7 @@ fn DecksPage() -> impl IntoView {
                     }
                     Ok(decks) => view! {
                         {create_form}
-                        <ul>
+                        <ul class="deck-cabinet">
                             {decks
                                 .into_iter()
                                 .map(|deck| {
@@ -413,19 +415,26 @@ fn DecksPage() -> impl IntoView {
                                     let name_value = deck.name.clone();
                                     let manage = signed_in.then(|| {
                                         view! {
-                                            " "
-                                            <ActionForm action=rename>
-                                                <input type="hidden" name="deck_id" value=deck_id.to_string() />
-                                                <input type="text" name="name" value=name_value />
-                                                <button type="submit">"Rename"</button>
-                                            </ActionForm>
-                                            <ActionForm action=delete>
-                                                <input type="hidden" name="deck_id" value=deck_id.to_string() />
-                                                <button type="submit">"Delete"</button>
-                                            </ActionForm>
+                                            <div class="manage">
+                                                <ActionForm action=rename>
+                                                    <input type="hidden" name="deck_id" value=deck_id.to_string() />
+                                                    <input type="text" name="name" value=name_value />
+                                                    <button type="submit">"Rename"</button>
+                                                </ActionForm>
+                                                <ActionForm action=delete>
+                                                    <input type="hidden" name="deck_id" value=deck_id.to_string() />
+                                                    <button type="submit">"Delete"</button>
+                                                </ActionForm>
+                                            </div>
                                         }
                                     });
-                                    view! { <li><a href=href>{deck.name}</a>{manage}</li> }
+                                    view! {
+                                        <li>
+                                            <div class="label-holder"><a href=href>{deck.name}</a></div>
+                                            <div class="pull"></div>
+                                            {manage}
+                                        </li>
+                                    }
                                 })
                                 .collect_view()}
                         </ul>
@@ -505,15 +514,15 @@ fn ReviewPage() -> impl IntoView {
                                 let card_id = card.id;
                                 view! {
                                     {counts}
-                                    <div>
+                                    <div class="review-card">
                                         {card
                                             .image_url
-                                            .map(|url| view! { <img src=url width="200" alt="" /> })}
+                                            .map(|url| view! { <img src=url alt="" /> })}
                                         <details>
                                             <summary>"Reveal"</summary>
                                             <p>{card.target_text}</p>
                                         </details>
-                                        <div>
+                                        <div class="review-grades">
                                             <button on:click=move |_| {
                                                 grade.dispatch(GradeCard { card_id, grade: GradeInput::Again });
                                             }>"Again"</button>
@@ -554,7 +563,7 @@ fn StatsPage() -> impl IntoView {
                 match stats.await {
                     Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
                     Ok(s) => view! {
-                        <ul>
+                        <ul class="ledger">
                             <li>{s.total_cards} " cards in the shared pool"</li>
                             <li>{s.due_now} " due right now"</li>
                             <li>{s.reviews_today} " reviews logged today"</li>
@@ -565,7 +574,7 @@ fn StatsPage() -> impl IntoView {
                             view! { <p>"None yet — nice."</p> }.into_any()
                         } else {
                             view! {
-                                <ul>
+                                <ul class="ledger">
                                     {s.hardest_cards
                                         .into_iter()
                                         .map(|c| {

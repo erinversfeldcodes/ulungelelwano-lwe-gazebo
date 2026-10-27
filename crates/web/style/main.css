@@ -1,4 +1,422 @@
+/* Gazebo — antique library card-catalog aesthetic over an Anki-dense
+   layout: flashcards look like index cards, decks look like the drawers
+   they'd have lived in. System fonts only — no external font/CDN
+   dependency, consistent with the rest of this project staying
+   self-contained and Docker-emulatable offline. */
+
+:root {
+    --wall: #2b2420;
+    --wall-dark: #1d1814;
+    --wood-dark: #4a3728;
+    --wood-medium: #6b4f3a;
+    --wood-light: #8a6b4e;
+    --brass: #c9a227;
+    --brass-dim: #9c7f2e;
+    --brass-bright: #e0c158;
+    --paper: #f2e8d5;
+    --paper-aged: #e8dbc0;
+    --paper-dark: #ddcdac;
+    --ink: #2b2015;
+    --ink-faded: #6b5a44;
+    --rule-red: #8b3a3a;
+    --shadow: rgba(20, 14, 8, 0.45);
+    --shadow-soft: rgba(20, 14, 8, 0.25);
+
+    --font-serif: Georgia, "Palatino Linotype", "Book Antiqua", Palatino, "Times New Roman", serif;
+    --font-type: "Courier New", Courier, monospace;
+}
+
+* {
+    box-sizing: border-box;
+}
+
 body {
-    font-family: system-ui, sans-serif;
-    margin: 2rem;
+    font-family: var(--font-serif);
+    color: var(--ink);
+    background: var(--wall);
+    background-image:
+        radial-gradient(ellipse at top, var(--wall) 0%, var(--wall-dark) 100%);
+    margin: 0;
+    padding: 0 0 3rem;
+    min-height: 100vh;
+}
+
+h1, h2 {
+    font-family: var(--font-serif);
+    font-weight: normal;
+    letter-spacing: 0.03em;
+}
+
+a {
+    color: var(--brass-bright);
+}
+
+a:hover {
+    color: var(--paper);
+}
+
+/* --- Nav: a brass-trimmed plaque along the top of the cabinet room --- */
+
+nav {
+    background: linear-gradient(var(--wood-dark), var(--wood-medium) 90%, var(--brass-dim));
+    border-bottom: 3px solid var(--brass);
+    padding: 0.9rem 1.5rem;
+    font-size: 0.95rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    box-shadow: 0 4px 12px var(--shadow);
+}
+
+nav a {
+    color: var(--paper);
+    text-decoration: none;
+    font-weight: bold;
+}
+
+nav a:hover {
+    color: var(--brass-bright);
+    text-decoration: underline;
+}
+
+main {
+    max-width: 72rem;
+    margin: 2rem auto 0;
+    padding: 0 1.5rem;
+}
+
+h1 {
+    color: var(--paper);
+    font-size: 1.8rem;
+    margin-bottom: 1.2rem;
+    border-bottom: 1px solid var(--brass-dim);
+    padding-bottom: 0.4rem;
+}
+
+h2 {
+    color: var(--paper-aged);
+    font-size: 1.2rem;
+    margin-top: 1.8rem;
+}
+
+p, label {
+    color: var(--paper-aged);
+}
+
+/* --- Forms: filling out a card by hand, on a paper surface --- */
+
+form {
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 2px;
+    box-shadow: 0 3px 10px var(--shadow-soft), inset 0 0 0 6px var(--paper);
+    padding: 1.2rem 1.4rem;
+    max-width: 32rem;
+}
+
+form label {
+    display: block;
+    color: var(--ink-faded);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.8rem;
+}
+
+form input[type="text"],
+form input[type="email"],
+form input[type="number"],
+form input[type="file"] {
+    display: block;
+    width: 100%;
+    font-family: var(--font-type);
+    font-size: 1rem;
+    color: var(--ink);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--ink-faded);
+    padding: 0.3rem 0.1rem;
+    margin-top: 0.3rem;
+}
+
+form input:focus {
+    outline: none;
+    border-bottom: 2px solid var(--rule-red);
+}
+
+button,
+input[type="submit"] {
+    font-family: var(--font-serif);
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--paper);
+    background: linear-gradient(var(--wood-light), var(--wood-dark));
+    border: 1px solid var(--brass-dim);
+    border-radius: 2px;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    box-shadow: 0 2px 4px var(--shadow-soft);
+}
+
+button:hover {
+    background: linear-gradient(var(--wood-medium), var(--wood-dark));
+    border-color: var(--brass);
+}
+
+select {
+    font-family: var(--font-serif);
+    background: var(--paper);
+    border: 1px solid var(--wood-medium);
+    border-radius: 2px;
+    padding: 0.3rem 0.5rem;
+}
+
+/* --- Card list: a scatter of index cards pulled from the drawer --- */
+
+.card-grid {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    gap: 1.4rem;
+}
+
+.card-grid li {
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 1px;
+    box-shadow: 0 3px 8px var(--shadow-soft), 0 0 0 1px rgba(255, 255, 255, 0.4) inset;
+    padding: 0.9rem 0.9rem 0.7rem;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    transition: transform 0.15s ease;
+}
+
+.card-grid li::before {
+    content: "";
+    position: absolute;
+    top: 1.6rem;
+    left: 0.7rem;
+    right: 0.7rem;
+    border-top: 1px solid var(--rule-red);
+    opacity: 0.55;
+}
+
+.card-grid li:nth-child(odd) {
+    transform: rotate(-0.6deg);
+}
+
+.card-grid li:nth-child(even) {
+    transform: rotate(0.5deg);
+}
+
+.card-grid li:hover {
+    transform: translateY(-3px) rotate(0deg);
+    box-shadow: 0 8px 18px var(--shadow);
+    z-index: 1;
+}
+
+.card-grid li img {
+    border: 1px solid var(--paper-dark);
+    max-width: 100%;
+    height: auto;
+    align-self: flex-start;
+    margin-top: 0.6rem;
+}
+
+.card-grid li span {
+    font-family: var(--font-type);
+    font-size: 1.05rem;
+    color: var(--ink);
+}
+
+.card-grid li a {
+    font-family: var(--font-serif);
+    font-size: 0.8rem;
+    color: var(--rule-red);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    align-self: flex-end;
+}
+
+/* --- Decks: a card-catalog cabinet of drawers --- */
+
+.deck-cabinet {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: 1.1rem;
+    list-style: none;
+    margin: 1.2rem 0 0;
+    padding: 0;
+}
+
+.deck-cabinet li {
+    background: linear-gradient(180deg, var(--wood-light) 0%, var(--wood-medium) 55%, var(--wood-dark) 100%);
+    border: 1px solid var(--wall-dark);
+    border-radius: 2px;
+    box-shadow: 0 4px 10px var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    padding: 1rem 0.8rem 1.2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+    transition: transform 0.15s ease;
+}
+
+.deck-cabinet li:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 16px var(--shadow);
+}
+
+.deck-cabinet .label-holder {
+    background: var(--paper);
+    border: 1px solid var(--brass-dim);
+    border-radius: 1px;
+    box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.25);
+    padding: 0.4rem 0.5rem;
+    width: 100%;
+    text-align: center;
+}
+
+.deck-cabinet .label-holder a {
+    font-family: var(--font-type);
+    font-size: 0.85rem;
+    color: var(--ink);
+    text-decoration: none;
+    word-break: break-word;
+}
+
+.deck-cabinet .pull {
+    width: 1.8rem;
+    height: 0.4rem;
+    background: linear-gradient(var(--brass-bright), var(--brass-dim));
+    border-radius: 2px;
+    box-shadow: 0 1px 2px var(--shadow);
+}
+
+.deck-cabinet .manage {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    width: 100%;
+}
+
+.deck-cabinet .manage form {
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    display: flex;
+    gap: 0.3rem;
+    width: 100%;
+}
+
+.deck-cabinet .manage input[type="text"] {
+    color: var(--paper);
+    border-bottom-color: var(--brass-dim);
+    flex: 1;
+    min-width: 0;
+}
+
+.deck-cabinet .manage button {
+    font-size: 0.7rem;
+    padding: 0.3rem 0.5rem;
+    white-space: nowrap;
+}
+
+/* --- Review: the one card pulled out onto the reading desk --- */
+
+.review-card {
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 1px;
+    box-shadow: 0 10px 24px var(--shadow);
+    padding: 1.5rem 1.5rem 1.2rem;
+    max-width: 26rem;
+    margin: 1.5rem 0;
+    position: relative;
+}
+
+.review-card::before {
+    content: "";
+    position: absolute;
+    top: 2.4rem;
+    left: 1.2rem;
+    right: 1.2rem;
+    border-top: 1px solid var(--rule-red);
+    opacity: 0.55;
+}
+
+.review-card img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border: 1px solid var(--paper-dark);
+    margin: 0.8rem 0;
+}
+
+.review-card details summary {
+    cursor: pointer;
+    font-family: var(--font-serif);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--rule-red);
+    margin-top: 0.6rem;
+}
+
+.review-card details p {
+    font-family: var(--font-type);
+    font-size: 1.2rem;
+    color: var(--ink);
+    margin-top: 0.5rem;
+}
+
+.review-grades {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+.review-grades button {
+    flex: 1;
+    font-size: 0.75rem;
+    border-top-width: 3px;
+}
+
+/* A muted stamp-ink gradient across the four grades, from "file it back
+   under remedial" (red) to "shelve it, well learned" (brass gold). */
+.review-grades button:nth-child(1) { border-top-color: var(--rule-red); }
+.review-grades button:nth-child(2) { border-top-color: #a3793f; }
+.review-grades button:nth-child(3) { border-top-color: #5c7a4a; }
+.review-grades button:nth-child(4) { border-top-color: var(--brass); }
+
+/* --- Stats: a circulation ledger --- */
+
+.ledger {
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    box-shadow: 0 3px 10px var(--shadow-soft);
+    padding: 1rem 1.4rem;
+    max-width: 28rem;
+}
+
+.ledger, .ledger li {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.ledger li {
+    font-family: var(--font-type);
+    color: var(--ink);
+    padding: 0.35rem 0;
+    border-bottom: 1px dotted var(--ink-faded);
+}
+
+.ledger li:last-child {
+    border-bottom: none;
 }
