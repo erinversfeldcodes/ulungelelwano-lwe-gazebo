@@ -20,10 +20,10 @@ jobs:
         id: branch
         uses: neondatabase/create-branch-action@v6
         with:
-          project_id: ${{ vars.NEON_PROJECT_ID }}
+          project_id: ${{ vars.NEON_STAGING_PROJECT_ID }}
           parent: staging
           branch_name: preview/pr-${{ github.event.number }}
-          api_key: ${{ secrets.NEON_API_KEY }}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
   deploy-preview:
     name: Deploy Fly preview app
@@ -59,6 +59,6 @@ jobs:
       - name: Delete Neon preview branch
         uses: neondatabase/delete-branch-action@v3
         with:
-          project_id: ${{ vars.NEON_PROJECT_ID }}
+          project_id: ${{ vars.NEON_STAGING_PROJECT_ID }}
           branch: preview/pr-${{ github.event.number }}
-          api_key: ${{ secrets.NEON_API_KEY }}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
