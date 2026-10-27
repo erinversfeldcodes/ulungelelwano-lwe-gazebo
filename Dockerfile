@@ -3,14 +3,19 @@ FROM rust:1 AS builder
 
 # Toolchain/tool install is its own layer so it stays cached across deploys —
 # it doesn't change anywhere near as often as the app source below does.
-RUN rustup target add wasm32-unknown-unknown \
+# mold matches .cargo/config.toml's linker override for Linux targets, which
+# this image doesn't otherwise provide.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mold \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add wasm32-unknown-unknown \
     && cargo install cargo-leptos --locked
 
 WORKDIR /app
 COPY . .
 # --precompress also disables cargo-leptos's default parallel front/server
-# build, which was contending for memory/CPU badly enough in constrained
-# build environments (CI, Fly's remote builder) to fail outright.
+# build, which otherwise interleaves output badly enough to obscure real
+# build errors.
 RUN RUST_BACKTRACE=full cargo leptos build --release --precompress
 
 # --- Runtime -----------------------------------------------------------------
