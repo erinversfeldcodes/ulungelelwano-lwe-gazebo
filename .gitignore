@@ -1,0 +1,17 @@
+/target
+/crates/*/target
+
+# Leptos build output
+/crates/web/target
+
+# Local secrets
+.env
+.env.local
+
+# Nix
+.direnv/
+
+# Editor/OS cruft
+.DS_Store
+.neon
+node_modules/

@@ -1,0 +1,7 @@
+# Faster linking in CI (Linux). macOS keeps the system default linker,
+# since mold's macOS support is not where its Linux support is.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

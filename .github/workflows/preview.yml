@@ -1,0 +1,64 @@
+name: Preview
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+concurrency:
+  group: preview-pr-${{ github.event.number }}
+  cancel-in-progress: true
+
+jobs:
+  neon-branch:
+    name: Create/refresh Neon preview branch
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      db_url: ${{ steps.branch.outputs.db_url }}
+    steps:
+      - name: Create Neon branch (copy-on-write child of `staging`, never prod)
+        id: branch
+        uses: neondatabase/create-branch-action@v6
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          parent: staging
+          branch_name: preview/pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+
+  deploy-preview:
+    name: Deploy Fly preview app
+    if: github.event.action != 'closed'
+    needs: neon-branch
+    runs-on: ubuntu-latest
+    environment:
+      name: pr-${{ github.event.number }}
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy preview app
+        id: deploy
+        uses: superfly/fly-pr-review-apps@main
+        with:
+          name: gazebo-pr-${{ github.event.number }}
+          secrets: DATABASE_URL=${{ needs.neon-branch.outputs.db_url }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  cleanup:
+    name: Tear down preview app + Neon branch
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Destroy Fly preview app
+        uses: superfly/fly-pr-review-apps@main
+        with:
+          name: gazebo-pr-${{ github.event.number }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Delete Neon preview branch
+        uses: neondatabase/delete-branch-action@v3
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          branch: preview/pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_API_KEY }}

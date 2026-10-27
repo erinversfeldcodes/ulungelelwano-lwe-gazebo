@@ -1,0 +1,56 @@
+[package]
+name = "web"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "web"
+path = "src/main.rs"
+required-features = ["ssr"]
+
+[dependencies]
+axum = { version = "0.8.9", optional = true }
+console_error_panic_hook = { version = "0.1.7", optional = true }
+console_log = { version = "1.1.0", optional = true }
+domain = { path = "../domain" }
+leptos = "0.8.22"
+leptos_axum = { version = "0.8.10", optional = true }
+leptos_meta = "0.8.7"
+leptos_router = "0.8.17"
+log = "0.4.34"
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"], optional = true }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"], optional = true }
+tower-http = { version = "0.7.1", features = ["fs"], optional = true }
+wasm-bindgen = "0.2.129"
+
+[features]
+default = []
+hydrate = ["leptos/hydrate", "dep:console_error_panic_hook", "dep:console_log"]
+ssr = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:leptos_axum",
+    "dep:sqlx",
+    "leptos/ssr",
+    "leptos_meta/ssr",
+    "leptos_router/ssr",
+]
+
+[package.metadata.leptos]
+output-name = "web"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/main.css"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+env = "DEV"
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
