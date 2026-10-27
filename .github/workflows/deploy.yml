@@ -23,3 +23,7 @@ jobs:
       - run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Verify email delivery works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            https://gazebo.fly.dev/internal/email-check

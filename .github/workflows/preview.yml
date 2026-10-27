@@ -40,9 +40,19 @@ jobs:
         uses: superfly/fly-pr-review-apps@main
         with:
           name: gazebo-pr-${{ github.event.number }}
-          secrets: DATABASE_URL=${{ needs.neon-branch.outputs.db_url }}
+          secrets: >
+            DATABASE_URL=${{ needs.neon-branch.outputs.db_url }}
+            RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
+            EMAIL_FROM=${{ vars.EMAIL_FROM }}
+            TEST_EMAIL_RECIPIENT=${{ vars.TEST_EMAIL_RECIPIENT }}
+            APP_BASE_URL=https://gazebo-pr-${{ github.event.number }}.fly.dev
+            INTERNAL_CHECK_TOKEN=${{ secrets.INTERNAL_CHECK_TOKEN }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Verify email delivery works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/email-check"
 
   cleanup:
     name: Tear down preview app + Neon branch
