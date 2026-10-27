@@ -8,7 +8,10 @@ RUN rustup target add wasm32-unknown-unknown \
 
 WORKDIR /app
 COPY . .
-RUN RUST_BACKTRACE=full cargo leptos build --release
+# --precompress also disables cargo-leptos's default parallel front/server
+# build, which was contending for memory/CPU badly enough in constrained
+# build environments (CI, Fly's remote builder) to fail outright.
+RUN RUST_BACKTRACE=full cargo leptos build --release --precompress
 
 # --- Runtime -----------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime

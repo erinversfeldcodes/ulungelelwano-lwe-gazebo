@@ -40,4 +40,4 @@ test:
 
 # Production-profile build (used by the Dockerfile)
 build-release:
-    cargo leptos build --release
+    cargo leptos build --release --precompress
