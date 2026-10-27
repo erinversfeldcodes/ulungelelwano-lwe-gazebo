@@ -92,7 +92,12 @@ test("an anonymous visitor sees a card read-only, with no edit form", async ({ p
     await expect(anonPage.getByText(word, { exact: true })).toBeVisible();
     await expect(anonPage.getByLabel("Target-language word/phrase")).not.toBeVisible();
     await expect(anonPage.getByRole("button", { name: "Delete card" })).not.toBeVisible();
-    await expect(anonPage.getByRole("link", { name: "Sign in" })).toBeVisible();
+    // Scoped to the nav: the page also has a second "Sign in" link in its
+    // own "Sign in to edit this card" prompt, so the bare role query matches
+    // both and trips Playwright's strict mode.
+    await expect(
+      anonPage.getByRole("navigation").getByRole("link", { name: "Sign in" }),
+    ).toBeVisible();
   } finally {
     await anonContext.close();
   }
