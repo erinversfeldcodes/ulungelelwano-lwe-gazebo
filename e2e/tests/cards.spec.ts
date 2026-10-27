@@ -75,10 +75,16 @@ test("an anonymous visitor sees a card read-only, with no edit form", async ({ p
     .getAttribute("href");
   if (!cardUrl) throw new Error(`couldn't find the card link for "${word}"`);
 
+  // browser.newContext() doesn't inherit the project's `baseURL` the way
+  // the `page` fixture does, so a relative href like cardUrl would fail to
+  // resolve — build an absolute URL against the authenticated page's own
+  // origin instead.
+  const absoluteCardUrl = new URL(cardUrl, page.url()).toString();
+
   const anonContext = await browser.newContext();
   const anonPage = await anonContext.newPage();
   try {
-    await anonPage.goto(cardUrl);
+    await anonPage.goto(absoluteCardUrl);
     await expect(anonPage.getByText(word, { exact: true })).toBeVisible();
     await expect(anonPage.getByLabel("Target-language word/phrase")).not.toBeVisible();
     await expect(anonPage.getByRole("button", { name: "Delete card" })).not.toBeVisible();
