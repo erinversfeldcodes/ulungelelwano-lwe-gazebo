@@ -34,7 +34,7 @@ jobs:
       name: pr-${{ github.event.number }}
       url: ${{ steps.deploy.outputs.url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Deploy preview app
         id: deploy
         uses: superfly/fly-pr-review-apps@main
@@ -49,7 +49,7 @@ jobs:
     if: github.event.action == 'closed'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Destroy Fly preview app
         uses: superfly/fly-pr-review-apps@main
         with:
