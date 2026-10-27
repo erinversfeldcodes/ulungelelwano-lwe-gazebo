@@ -30,9 +30,6 @@ jobs:
     if: github.event.action != 'closed'
     needs: neon-branch
     runs-on: ubuntu-latest
-    environment:
-      name: pr-${{ github.event.number }}
-      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
