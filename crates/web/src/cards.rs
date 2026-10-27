@@ -79,7 +79,7 @@ pub async fn list_cards(
     tag: Option<String>,
     deck_id: Option<Uuid>,
 ) -> Result<Vec<Card>, ServerFnError> {
-    require_user().await?;
+    // Browsing the shared card pool is public; only mutating it needs auth.
     let state = expect_context::<crate::state::AppState>();
     let rows = crate::db::list_cards(&state.db_pool, tag.as_deref(), deck_id)
         .await
@@ -96,7 +96,6 @@ pub async fn list_cards(
 
 #[server]
 pub async fn list_tags() -> Result<Vec<String>, ServerFnError> {
-    require_user().await?;
     let state = expect_context::<crate::state::AppState>();
     crate::db::list_tags(&state.db_pool)
         .await
@@ -105,7 +104,6 @@ pub async fn list_tags() -> Result<Vec<String>, ServerFnError> {
 
 #[server]
 pub async fn get_card(card_id: Uuid) -> Result<Option<CardDetail>, ServerFnError> {
-    require_user().await?;
     let state = expect_context::<crate::state::AppState>();
     let Some(card) = crate::db::get_card(&state.db_pool, card_id)
         .await

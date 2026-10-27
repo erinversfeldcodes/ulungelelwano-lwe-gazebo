@@ -27,3 +27,7 @@ jobs:
         run: |
           curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
             https://gazebo.fly.dev/internal/email-check
+      - name: Verify storage upload works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            https://gazebo.fly.dev/internal/storage-check

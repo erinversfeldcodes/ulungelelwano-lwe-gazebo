@@ -45,7 +45,10 @@ jobs:
           TIGRIS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_CI_SECRET_ACCESS_KEY }}
         run: |
           npm install -g @tigrisdata/cli
-          tigris configure --access-key "$TIGRIS_ACCESS_KEY_ID" --access-secret "$TIGRIS_SECRET_ACCESS_KEY"
+          # --endpoint must be passed explicitly: in CI's non-interactive
+          # shell the CLI refuses to fall back to its documented default
+          # (https://t3.storage.dev) and errors instead of using it.
+          tigris configure --access-key "$TIGRIS_ACCESS_KEY_ID" --access-secret "$TIGRIS_SECRET_ACCESS_KEY" --endpoint https://t3.storage.dev
 
           BUCKET="gazebo-cards-pr-${{ github.event.number }}"
           # Idempotent: a `synchronize` re-run on the same PR may find the
@@ -94,6 +97,10 @@ jobs:
         run: |
           curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
             "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/email-check"
+      - name: Verify storage upload works
+        run: |
+          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+            "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/storage-check"
 
   e2e:
     name: Run E2E suite against preview
@@ -160,7 +167,7 @@ jobs:
           TIGRIS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_CI_SECRET_ACCESS_KEY }}
         run: |
           npm install -g @tigrisdata/cli
-          tigris configure --access-key "$TIGRIS_ACCESS_KEY_ID" --access-secret "$TIGRIS_SECRET_ACCESS_KEY"
+          tigris configure --access-key "$TIGRIS_ACCESS_KEY_ID" --access-secret "$TIGRIS_SECRET_ACCESS_KEY" --endpoint https://t3.storage.dev
 
           KEY_NAME="gazebo-pr-${{ github.event.number }}"
           KEY_ID="$(tigris access-keys list --json | jq -r --arg n "$KEY_NAME" '.items[] | select(.name==$n) | .id')"

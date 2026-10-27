@@ -56,6 +56,7 @@ pub async fn request_magic_link(
             .await
             .map_err(|e| e.to_string())?;
         if count >= MAX_USERS {
+            log::warn!("auth: sign-up rejected at the {MAX_USERS}-user cap for {email}");
             return Err("This app is limited to 4 users and is already full.".to_string());
         }
     }
@@ -78,7 +79,10 @@ pub async fn request_magic_link(
     email_sender
         .send_magic_link(&email, &link)
         .await
-        .map_err(|e| format!("failed to send email: {e}"))
+        .map_err(|e| {
+            log::error!("auth: failed to send magic-link email to {email}: {e}");
+            format!("failed to send email: {e}")
+        })
 }
 
 /// Redeems a magic-link token: finds-or-creates the user, marks the token
@@ -93,13 +97,17 @@ pub async fn verify_login_token(pool: &PgPool, token: &str) -> Result<String, St
         .await
         .map_err(|e| e.to_string())?;
 
-    let (email, user_id, expires_at, used_at) =
-        row.ok_or_else(|| "invalid sign-in link".to_string())?;
+    let Some((email, user_id, expires_at, used_at)) = row else {
+        log::warn!("auth: sign-in attempted with an unknown token");
+        return Err("invalid sign-in link".to_string());
+    };
 
     if used_at.is_some() {
+        log::warn!("auth: sign-in attempted with an already-used token for {email}");
         return Err("this sign-in link has already been used".to_string());
     }
     if expires_at < OffsetDateTime::now_utc() {
+        log::warn!("auth: sign-in attempted with an expired token for {email}");
         return Err("this sign-in link has expired".to_string());
     }
 

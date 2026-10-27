@@ -77,6 +77,52 @@ async fn email_check(
     }
 }
 
+/// Same shape and purpose as `email_check`: hit by CI right after every
+/// deploy to prove the configured S3-compatible storage (Tigris in
+/// prod/preview) is actually reachable and writable, not just that env
+/// vars are set. Not a liveness probe, so not wired into fly.toml's
+/// automatic health checks — it does a real write on every call.
+#[cfg(feature = "ssr")]
+async fn storage_check(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::http::StatusCode {
+    let expected_token = match std::env::var("INTERNAL_CHECK_TOKEN") {
+        Ok(token) if !token.is_empty() => token,
+        _ => return axum::http::StatusCode::UNAUTHORIZED,
+    };
+    let provided_token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if provided_token != Some(expected_token.as_str()) {
+        return axum::http::StatusCode::UNAUTHORIZED;
+    }
+
+    let Some(storage) = &state.storage else {
+        log::info!("storage-check: no S3_* env vars set, skipping");
+        return axum::http::StatusCode::OK;
+    };
+
+    match storage
+        .upload(
+            "internal/storage-check.txt",
+            "text/plain",
+            b"gazebo storage-check",
+        )
+        .await
+    {
+        Ok(url) => {
+            log::info!("storage-check: upload succeeded, reachable at {url}");
+            axum::http::StatusCode::OK
+        }
+        Err(e) => {
+            log::error!("storage-check: upload failed: {e}");
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+}
+
 fn random_key() -> String {
     use rand::RngExt;
     use std::fmt::Write as _;
@@ -118,15 +164,31 @@ async fn parse_card_multipart(
                     .bytes()
                     .await
                     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
-                if !data.is_empty()
-                    && let (Some(storage), Some(content_type)) = (&state.storage, content_type)
-                {
-                    let key = format!("cards/{}", random_key());
-                    let url = storage
-                        .upload(&key, &content_type, &data)
-                        .await
-                        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-                    uploaded_url = Some(url);
+                if !data.is_empty() {
+                    match (&state.storage, content_type) {
+                        (Some(storage), Some(content_type)) => {
+                            let key = format!("cards/{}", random_key());
+                            let url =
+                                storage
+                                    .upload(&key, &content_type, &data)
+                                    .await
+                                    .map_err(|e| {
+                                        log::error!("card image upload failed: {e}");
+                                        (axum::http::StatusCode::BAD_GATEWAY, e)
+                                    })?;
+                            uploaded_url = Some(url);
+                        }
+                        (None, _) => {
+                            log::warn!(
+                                "card image upload attached but no storage is configured — dropping it silently"
+                            );
+                        }
+                        (Some(_), None) => {
+                            log::warn!(
+                                "card image upload attached with no content-type — dropping it"
+                            );
+                        }
+                    }
                 }
             }
             _ => {}
@@ -265,6 +327,7 @@ async fn main() {
         .route("/auth/verify", axum::routing::get(auth_verify))
         .route("/auth/logout", axum::routing::get(auth_logout))
         .route("/internal/email-check", axum::routing::get(email_check))
+        .route("/internal/storage-check", axum::routing::get(storage_check))
         .route("/cards/new", axum::routing::post(cards_new))
         .route("/cards/{id}", axum::routing::post(cards_update))
         .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell))

@@ -122,6 +122,27 @@ pub async fn card_tags(pool: &PgPool, card_id: Uuid) -> sqlx::Result<Vec<String>
         .await
 }
 
+/// The deck every new card lands in automatically. Found by name rather
+/// than a fixed id: simpler than seeding one in a migration (which would
+/// need a `created_by` user that doesn't exist yet at migration time), and
+/// self-healing if someone ever deletes it — the next card creation just
+/// makes a fresh one.
+async fn ensure_default_deck_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    created_by: Uuid,
+) -> sqlx::Result<Uuid> {
+    if let Some(id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM decks WHERE name = 'Default'")
+        .fetch_optional(&mut **tx)
+        .await?
+    {
+        return Ok(id);
+    }
+    sqlx::query_scalar("INSERT INTO decks (name, created_by) VALUES ('Default', $1) RETURNING id")
+        .bind(created_by)
+        .fetch_one(&mut **tx)
+        .await
+}
+
 pub async fn create_card(
     pool: &PgPool,
     created_by: Uuid,
@@ -142,6 +163,14 @@ pub async fn create_card(
     .await?;
 
     set_card_tags_in_tx(&mut tx, id, tags).await?;
+
+    let default_deck_id = ensure_default_deck_in_tx(&mut tx, created_by).await?;
+    sqlx::query("INSERT INTO deck_cards (deck_id, card_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(default_deck_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
     Ok(id)
 }
@@ -210,6 +239,24 @@ pub async fn list_decks(pool: &PgPool) -> sqlx::Result<Vec<DeckRow>> {
     sqlx::query_as("SELECT id, name FROM decks ORDER BY name")
         .fetch_all(pool)
         .await
+}
+
+pub async fn rename_deck(pool: &PgPool, deck_id: Uuid, name: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE decks SET name = $1 WHERE id = $2")
+        .bind(name)
+        .bind(deck_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_deck(pool: &PgPool, deck_id: Uuid) -> sqlx::Result<()> {
+    // deck_cards cascades on decks.id.
+    sqlx::query("DELETE FROM decks WHERE id = $1")
+        .bind(deck_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn add_card_to_deck(pool: &PgPool, deck_id: Uuid, card_id: Uuid) -> sqlx::Result<()> {
@@ -699,6 +746,63 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn creating_a_card_adds_it_to_the_default_deck(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+
+        let decks = list_decks(&pool).await.unwrap();
+        assert_eq!(decks.len(), 1);
+        assert_eq!(decks[0].name, "Default");
+
+        let cards = list_cards(&pool, None, Some(decks[0].id)).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, card_id);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn two_cards_share_the_same_default_deck(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        create_card(&pool, user_id, "", "one", &[]).await.unwrap();
+        create_card(&pool, user_id, "", "two", &[]).await.unwrap();
+
+        // One Default deck, not a fresh one per card.
+        assert_eq!(list_decks(&pool).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn renaming_a_deck_changes_its_name(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let deck_id = create_deck(&pool, user_id, "Old Name").await.unwrap();
+
+        rename_deck(&pool, deck_id, "New Name").await.unwrap();
+
+        let decks = list_decks(&pool).await.unwrap();
+        assert_eq!(decks.len(), 1);
+        assert_eq!(decks[0].name, "New Name");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn deleting_a_deck_removes_it_and_its_card_memberships(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let deck_id = create_deck(&pool, user_id, "Temp").await.unwrap();
+        add_card_to_deck(&pool, deck_id, card_id).await.unwrap();
+
+        delete_deck(&pool, deck_id).await.unwrap();
+
+        assert!(
+            list_decks(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .all(|d| d.id != deck_id)
+        );
+        // The card itself survives — only its membership in the deleted
+        // deck is gone.
+        assert!(get_card(&pool, card_id).await.unwrap().is_some());
     }
 
     #[sqlx::test(migrations = "../../migrations")]

@@ -61,3 +61,29 @@ test("deleting a card removes it from the list", async ({ page }) => {
   await expect(page).toHaveURL("/");
   await expect(page.getByText(word, { exact: true })).not.toBeVisible();
 });
+
+test("an anonymous visitor sees a card read-only, with no edit form", async ({ page, browser }) => {
+  const word = uniqueWord("cards-spec-anon");
+
+  await page.goto("/new");
+  await page.getByLabel("Target-language word/phrase").fill(word);
+  await page.getByRole("button", { name: "Add" }).click();
+  await expect(page).toHaveURL("/");
+  const cardUrl = await page
+    .locator("li", { hasText: word })
+    .getByRole("link", { name: "Edit" })
+    .getAttribute("href");
+  if (!cardUrl) throw new Error(`couldn't find the card link for "${word}"`);
+
+  const anonContext = await browser.newContext();
+  const anonPage = await anonContext.newPage();
+  try {
+    await anonPage.goto(cardUrl);
+    await expect(anonPage.getByText(word, { exact: true })).toBeVisible();
+    await expect(anonPage.getByLabel("Target-language word/phrase")).not.toBeVisible();
+    await expect(anonPage.getByRole("button", { name: "Delete card" })).not.toBeVisible();
+    await expect(anonPage.getByRole("link", { name: "Sign in" })).toBeVisible();
+  } finally {
+    await anonContext.close();
+  }
+});

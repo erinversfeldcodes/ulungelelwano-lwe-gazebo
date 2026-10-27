@@ -6,7 +6,9 @@ use crate::account::{RequestMagicLink, SetDailyNewCardLimit, current_user_name, 
 use crate::cards::{
     DeleteCard, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags, review_queue,
 };
-use crate::decks::{AddCardToDeck, CreateDeck, RemoveCardFromDeck, list_decks};
+use crate::decks::{
+    AddCardToDeck, CreateDeck, DeleteDeck, RemoveCardFromDeck, RenameDeck, list_decks,
+};
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::{
@@ -38,6 +40,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+    let auth = Resource::new(|| (), |()| current_user_name());
 
     view! {
         <Stylesheet id="leptos" href="/pkg/web.css"/>
@@ -47,17 +50,21 @@ pub fn App() -> impl IntoView {
             <nav>
                 <A href="/">"Cards"</A>
                 " · "
-                <A href="/new">"Add a card"</A>
-                " · "
                 <A href="/decks">"Decks"</A>
-                " · "
-                <A href="/review">"Review"</A>
-                " · "
-                <A href="/stats">"Stats"</A>
-                " · "
-                <A href="/settings">"Settings"</A>
-                " · "
-                <a href="/auth/logout">"Sign out"</a>
+                <Transition fallback=|| ()>
+                    {move || Suspend::new(async move {
+                        match auth.await.ok().flatten() {
+                            Some(_) => view! {
+                                " · "<A href="/new">"Add a card"</A>
+                                " · "<A href="/review">"Review"</A>
+                                " · "<A href="/stats">"Stats"</A>
+                                " · "<A href="/settings">"Settings"</A>
+                                " · "<a href="/auth/logout">"Sign out"</a>
+                            }.into_any(),
+                            None => view! { " · "<A href="/login">"Sign in"</A> }.into_any(),
+                        }
+                    })}
+                </Transition>
             </nav>
             <main>
                 <Routes fallback=|| "Page not found.">
@@ -99,7 +106,6 @@ fn LoginPage() -> impl IntoView {
 
 #[component]
 fn CardListPage() -> impl IntoView {
-    let auth = Resource::new(|| (), |()| current_user_name());
     let tag_filter = RwSignal::new(None::<String>);
     let deck_filter = RwSignal::new(None::<Uuid>);
 
@@ -149,9 +155,6 @@ fn CardListPage() -> impl IntoView {
         </div>
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
-                if auth.await.ok().flatten().is_none() {
-                    return view! { <Redirect path="/login"/> }.into_any();
-                }
                 match cards.await {
                     Ok(cards) if cards.is_empty() => view! { <p>"No cards match."</p> }.into_any(),
                     Ok(cards) => view! {
@@ -184,14 +187,26 @@ fn CardListPage() -> impl IntoView {
 
 #[component]
 fn NewCardPage() -> impl IntoView {
+    let auth = Resource::new(|| (), |()| current_user_name());
+
     view! {
         <h1>"Add a card"</h1>
-        <form method="post" action="/cards/new" enctype="multipart/form-data">
-            <label>"Image file" <input type="file" name="image" accept="image/*" /></label>
-            <label>"Target-language word/phrase" <input type="text" name="target_text" /></label>
-            <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
-            <button type="submit">"Add"</button>
-        </form>
+        <Transition fallback=|| view! { <p>"Loading…"</p> }>
+            {move || Suspend::new(async move {
+                if auth.await.ok().flatten().is_none() {
+                    return view! { <Redirect path="/login"/> }.into_any();
+                }
+                view! {
+                    <form method="post" action="/cards/new" enctype="multipart/form-data">
+                        <label>"Image file" <input type="file" name="image" accept="image/*" /></label>
+                        <label>"Target-language word/phrase" <input type="text" name="target_text" /></label>
+                        <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
+                        <button type="submit">"Add"</button>
+                    </form>
+                }
+                .into_any()
+            })}
+        </Transition>
     }
 }
 
@@ -226,77 +241,124 @@ fn EditCardPage() -> impl IntoView {
     });
 
     view! {
-        <h1>"Edit card"</h1>
+        <h1>"Card"</h1>
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
-                if auth.await.ok().flatten().is_none() {
-                    return view! { <Redirect path="/login"/> }.into_any();
-                }
                 let Some(id) = card_id() else {
                     return view! { <p>"Invalid card."</p> }.into_any();
                 };
+                let signed_in = auth.await.ok().flatten().is_some();
                 match card.await {
                     Ok(None) => view! { <p>"Card not found."</p> }.into_any(),
                     Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
                     Ok(Some(detail)) => {
                         let action = format!("/cards/{id}");
-                        let existing_image = detail.image_url.clone();
-                        let tags_value = detail.tags.join(", ");
+                        let image_view = detail
+                            .image_url
+                            .clone()
+                            .map(|url| view! { <img src=url width="200" alt="" /> });
                         let deck_ids = detail.deck_ids.clone();
-                        view! {
-                            <form method="post" action=action enctype="multipart/form-data">
-                                {existing_image
-                                    .map(|url| view! { <p><img src=url width="120" alt="" /></p> })}
-                                <label>
-                                    "Replace image (optional)"
-                                    <input type="file" name="image" accept="image/*" />
-                                </label>
-                                <label>
-                                    "Target-language word/phrase"
-                                    <input type="text" name="target_text" value=detail.target_text />
-                                </label>
-                                <label>"Tags (comma separated)" <input type="text" name="tags" value=tags_value /></label>
-                                <button type="submit">"Save"</button>
-                            </form>
-                            <h2>"Decks"</h2>
-                            <Transition fallback=|| view! { <p>"Loading decks…"</p> }>
-                                {move || {
-                                    let deck_ids = deck_ids.clone();
-                                    Suspend::new(async move {
-                                        match decks.await {
-                                            Ok(decks) => decks
-                                                .into_iter()
-                                                .map(|deck| {
-                                                    let in_deck = deck_ids.contains(&deck.id);
-                                                    let deck_id = deck.id;
-                                                    view! {
-                                                        <label>
-                                                            <input
-                                                                type="checkbox"
-                                                                checked=in_deck
-                                                                on:change=move |ev| {
-                                                                    if event_target_checked(&ev) {
-                                                                        toggle_deck.dispatch(AddCardToDeck { deck_id, card_id: id });
-                                                                    } else {
-                                                                        untoggle_deck.dispatch(RemoveCardFromDeck { deck_id, card_id: id });
+
+                        // Anyone can view a card; only a signed-in user sees
+                        // the mutable form, deck checkboxes, and delete
+                        // button in place of their read-only equivalents.
+                        let read_only_info = (!signed_in).then(|| {
+                            let target_text = detail.target_text.clone();
+                            let tags_display = detail.tags.join(", ");
+                            view! {
+                                <p>{target_text}</p>
+                                {(!detail.tags.is_empty())
+                                    .then(|| view! { <p>"Tags: " {tags_display}</p> })}
+                            }
+                        });
+                        let edit_form = signed_in.then(|| {
+                            let tags_value = detail.tags.join(", ");
+                            view! {
+                                <form method="post" action=action enctype="multipart/form-data">
+                                    <label>
+                                        "Replace image (optional)"
+                                        <input type="file" name="image" accept="image/*" />
+                                    </label>
+                                    <label>
+                                        "Target-language word/phrase"
+                                        <input type="text" name="target_text" value=detail.target_text.clone() />
+                                    </label>
+                                    <label>"Tags (comma separated)" <input type="text" name="tags" value=tags_value /></label>
+                                    <button type="submit">"Save"</button>
+                                </form>
+                            }
+                        });
+                        let deck_section = {
+                            let deck_ids = deck_ids.clone();
+                            view! {
+                                <h2>"Decks"</h2>
+                                <Transition fallback=|| view! { <p>"Loading decks…"</p> }>
+                                    {move || {
+                                        let deck_ids = deck_ids.clone();
+                                        Suspend::new(async move {
+                                            match decks.await {
+                                                Ok(decks) if signed_in => decks
+                                                    .into_iter()
+                                                    .map(|deck| {
+                                                        let in_deck = deck_ids.contains(&deck.id);
+                                                        let deck_id = deck.id;
+                                                        view! {
+                                                            <label>
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked=in_deck
+                                                                    on:change=move |ev| {
+                                                                        if event_target_checked(&ev) {
+                                                                            toggle_deck.dispatch(AddCardToDeck { deck_id, card_id: id });
+                                                                        } else {
+                                                                            untoggle_deck.dispatch(RemoveCardFromDeck { deck_id, card_id: id });
+                                                                        }
                                                                     }
-                                                                }
-                                                            />
-                                                            {deck.name}
-                                                        </label>
+                                                                />
+                                                                {deck.name}
+                                                            </label>
+                                                        }
+                                                    })
+                                                    .collect_view()
+                                                    .into_any(),
+                                                Ok(decks) => {
+                                                    let names: Vec<_> = decks
+                                                        .into_iter()
+                                                        .filter(|d| deck_ids.contains(&d.id))
+                                                        .map(|d| d.name)
+                                                        .collect();
+                                                    if names.is_empty() {
+                                                        view! { <p>"Not in any deck."</p> }.into_any()
+                                                    } else {
+                                                        view! { <p>{names.join(", ")}</p> }.into_any()
                                                     }
-                                                })
-                                                .collect_view()
-                                                .into_any(),
-                                            Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
-                                        }
-                                    })
-                                }}
-                            </Transition>
-                            <ActionForm action=delete>
-                                <input type="hidden" name="card_id" value=id.to_string() />
-                                <button type="submit">"Delete card"</button>
-                            </ActionForm>
+                                                }
+                                                Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
+                                            }
+                                        })
+                                    }}
+                                </Transition>
+                            }
+                        };
+                        let delete_form = signed_in.then(|| {
+                            view! {
+                                <ActionForm action=delete>
+                                    <input type="hidden" name="card_id" value=id.to_string() />
+                                    <button type="submit">"Delete card"</button>
+                                </ActionForm>
+                            }
+                        });
+                        let sign_in_prompt = (!signed_in).then(|| {
+                            view! { <p><A href="/login">"Sign in"</A>" to edit this card."</p> }
+                        });
+
+                        view! {
+                            {image_view}
+                            {read_only_info}
+                            {edit_form}
+                            {deck_section}
+                            {delete_form}
+                            {sign_in_prompt}
                         }
                         .into_any()
                     }
@@ -310,28 +372,60 @@ fn EditCardPage() -> impl IntoView {
 fn DecksPage() -> impl IntoView {
     let auth = Resource::new(|| (), |()| current_user_name());
     let create = ServerAction::<CreateDeck>::new();
-    let decks = Resource::new(move || create.version().get(), |_| list_decks());
+    let rename = ServerAction::<RenameDeck>::new();
+    let delete = ServerAction::<DeleteDeck>::new();
+    let decks = Resource::new(
+        move || {
+            (
+                create.version().get(),
+                rename.version().get(),
+                delete.version().get(),
+            )
+        },
+        |_| list_decks(),
+    );
 
     view! {
         <h1>"Decks"</h1>
-        <ActionForm action=create>
-            <label>"New deck name" <input type="text" name="name" /></label>
-            <button type="submit">"Create"</button>
-        </ActionForm>
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
-                if auth.await.ok().flatten().is_none() {
-                    return view! { <Redirect path="/login"/> }.into_any();
-                }
+                let signed_in = auth.await.ok().flatten().is_some();
+                let create_form = signed_in.then(|| {
+                    view! {
+                        <ActionForm action=create>
+                            <label>"New deck name" <input type="text" name="name" /></label>
+                            <button type="submit">"Create"</button>
+                        </ActionForm>
+                    }
+                });
                 match decks.await {
-                    Ok(decks) if decks.is_empty() => view! { <p>"No decks yet."</p> }.into_any(),
+                    Ok(decks) if decks.is_empty() => {
+                        view! { {create_form} <p>"No decks yet."</p> }.into_any()
+                    }
                     Ok(decks) => view! {
+                        {create_form}
                         <ul>
                             {decks
                                 .into_iter()
                                 .map(|deck| {
                                     let href = format!("/?deck={}", deck.id);
-                                    view! { <li><a href=href>{deck.name}</a></li> }
+                                    let deck_id = deck.id;
+                                    let name_value = deck.name.clone();
+                                    let manage = signed_in.then(|| {
+                                        view! {
+                                            " "
+                                            <ActionForm action=rename>
+                                                <input type="hidden" name="deck_id" value=deck_id.to_string() />
+                                                <input type="text" name="name" value=name_value />
+                                                <button type="submit">"Rename"</button>
+                                            </ActionForm>
+                                            <ActionForm action=delete>
+                                                <input type="hidden" name="deck_id" value=deck_id.to_string() />
+                                                <button type="submit">"Delete"</button>
+                                            </ActionForm>
+                                        }
+                                    });
+                                    view! { <li><a href=href>{deck.name}</a>{manage}</li> }
                                 })
                                 .collect_view()}
                         </ul>

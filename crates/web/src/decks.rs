@@ -21,7 +21,7 @@ async fn require_user() -> Result<crate::auth::UserRow, ServerFnError> {
 
 #[server]
 pub async fn list_decks() -> Result<Vec<Deck>, ServerFnError> {
-    require_user().await?;
+    // Browsing decks is public; only mutating them needs auth.
     let state = expect_context::<crate::state::AppState>();
     let rows = crate::db::list_decks(&state.db_pool)
         .await
@@ -60,6 +60,26 @@ pub async fn remove_card_from_deck(deck_id: Uuid, card_id: Uuid) -> Result<(), S
     require_user().await?;
     let state = expect_context::<crate::state::AppState>();
     crate::db::remove_card_from_deck(&state.db_pool, deck_id, card_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(())
+}
+
+#[server]
+pub async fn rename_deck(deck_id: Uuid, name: String) -> Result<(), ServerFnError> {
+    require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::db::rename_deck(&state.db_pool, deck_id, &name)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(())
+}
+
+#[server]
+pub async fn delete_deck(deck_id: Uuid) -> Result<(), ServerFnError> {
+    require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::db::delete_deck(&state.db_pool, deck_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(())
