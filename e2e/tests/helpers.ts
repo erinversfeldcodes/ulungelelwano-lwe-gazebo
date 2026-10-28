@@ -1,5 +1,14 @@
 import { Page, expect } from "@playwright/test";
 
+// Every environment that actually sends mail (preview, and prod) uses
+// Resend's sandbox sender (onboarding@resend.dev) rather than a verified
+// custom domain. That sandbox rejects any recipient other than the
+// account owner's own exact address — no aliases, no other domains, not
+// even "@example.com" — so any e2e test that triggers a real magic-link
+// send (not just the DB-bypassing token lookup in auth.setup.ts) must
+// target this literal address rather than a unique per-run one.
+export const RESEND_ALLOWED_EMAIL = "erinversfeld@gmail.com";
+
 export function uniqueWord(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }

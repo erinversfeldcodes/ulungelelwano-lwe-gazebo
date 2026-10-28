@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { RESEND_ALLOWED_EMAIL } from "./helpers";
 
 // Runs signed out, deliberately ignoring the project's saved auth state.
 test.use({ storageState: { cookies: [], origins: [] } });
@@ -30,7 +31,12 @@ for (const path of ["/new", "/review", "/stats", "/settings"]) {
 
 test("requesting a magic link shows a confirmation, not an error", async ({ page }) => {
   await page.goto("/login");
-  await page.getByLabel("Email").fill(`auth-spec-${Date.now()}@example.com`);
+  // Not a unique per-run address: this exercises a real send through
+  // Resend's sandbox, which only accepts the account owner's own exact
+  // address (see helpers.ts). The confirmation message doesn't distinguish
+  // a new signup from an existing user, so reusing auth.setup.ts's already-
+  // registered address still exercises this test's actual assertion.
+  await page.getByLabel("Email").fill(RESEND_ALLOWED_EMAIL);
   await page.getByRole("button", { name: "Send magic link" }).click();
   await expect(page.getByText("Check your email for a sign-in link.")).toBeVisible();
 });
