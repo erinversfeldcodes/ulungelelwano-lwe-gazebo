@@ -52,6 +52,13 @@ struct RecorderSignals {
 /// that took the whole page down, not just this button). Keeping one
 /// shared view tree is what actually prevents that class of bug, not
 /// just a style preference.
+// leptos's #[component] macro doesn't forward a #[must_use] on its input
+// through to the function it generates, so clippy's must_use_candidate
+// lint can't actually be satisfied here — silenced rather than ignored:
+// discarding this call's return value would just mean the recorder never
+// renders, so the lint's underlying concern is real, just unfixable in
+// the way clippy expects for a #[component] fn.
+#[allow(clippy::must_use_candidate)]
 #[component]
 pub fn RecordButton(
     /// "audio" or "video" — selects getUserMedia constraints and the
@@ -193,6 +200,82 @@ mod browser {
         }
     }
 
+    // Each `dataavailable` tick (see `TIMESLICE_MS`) accumulates the chunk
+    // and the elapsed-time counter, then auto-stops once the hard size
+    // limit is hit.
+    fn on_data_available_closure(
+        chunks: Rc<RefCell<Vec<Blob>>>,
+        total_bytes: Rc<RefCell<f64>>,
+        active_recorder: Rc<RefCell<Option<MediaRecorder>>>,
+        elapsed_secs: RwSignal<u32>,
+        stopped_notice: RwSignal<Option<String>>,
+    ) -> Closure<dyn FnMut(BlobEvent)> {
+        Closure::<dyn FnMut(BlobEvent)>::new(move |event: BlobEvent| {
+            let Some(data) = event.data() else { return };
+            if data.size() <= 0.0 {
+                return;
+            }
+            *total_bytes.borrow_mut() += data.size();
+            chunks.borrow_mut().push(data);
+            elapsed_secs.set(elapsed_secs.get_untracked() + 1);
+
+            if *total_bytes.borrow() >= HARD_SIZE_LIMIT_BYTES
+                && let Some(media_recorder) = active_recorder.borrow().as_ref()
+            {
+                stopped_notice.set(Some(
+                    "Stopped automatically — reached the 50MB size limit.".to_string(),
+                ));
+                let _ = media_recorder.stop();
+            }
+        })
+    }
+
+    // Assembles the accumulated chunks into the final Blob/File and
+    // attaches it to `target_input`, exactly as though the user had
+    // picked it via "Choose File".
+    fn on_stop_closure(
+        chunks: Rc<RefCell<Vec<Blob>>>,
+        active_stream: Rc<RefCell<Option<MediaStream>>>,
+        mime_type: String,
+        target_input: NodeRef<html::Input>,
+        recording: RwSignal<bool>,
+        preview_url: RwSignal<Option<String>>,
+    ) -> Closure<dyn FnMut()> {
+        Closure::<dyn FnMut()>::new(move || {
+            recording.set(false);
+
+            let parts = js_sys::Array::new();
+            for blob in chunks.borrow().iter() {
+                parts.push(blob);
+            }
+            let blob_options = BlobPropertyBag::new();
+            blob_options.set_type(&mime_type);
+            let Ok(final_blob) = Blob::new_with_blob_sequence_and_options(&parts, &blob_options)
+            else {
+                stop_tracks(&active_stream);
+                return;
+            };
+
+            if let Ok(url) = Url::create_object_url_with_blob(&final_blob) {
+                preview_url.set(Some(url));
+            }
+
+            let file_options = FilePropertyBag::new();
+            file_options.set_type(&mime_type);
+            if let Ok(file) = File::new_with_blob_sequence_and_options(
+                &js_sys::Array::of1(&final_blob),
+                "recording.webm",
+                &file_options,
+            ) && let (Some(input), Ok(dt)) = (target_input.get_untracked(), DataTransfer::new())
+            {
+                let _ = dt.items().add_with_file(&file);
+                input.set_files(dt.files().as_ref());
+            }
+
+            stop_tracks(&active_stream);
+        })
+    }
+
     pub(super) fn stop_recording(active_recorder: &Rc<RefCell<Option<MediaRecorder>>>) {
         // Deliberately doesn't set `recording`/clear state itself — the
         // recorder's `onstop` handler (below) is the single place that
@@ -275,77 +358,29 @@ mod browser {
             let chunks: Rc<RefCell<Vec<Blob>>> = Rc::new(RefCell::new(Vec::new()));
             let total_bytes: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
 
-            let on_data_available = {
-                let chunks = chunks.clone();
-                let total_bytes = total_bytes.clone();
-                // Safe to capture now even though `media_recorder` isn't
-                // stored in `active_recorder` until after `start()`
-                // succeeds below: a dataavailable event can't fire until
-                // at least one timeslice (1s) after that point, by which
-                // time the cell is already populated.
-                let active_recorder = active_recorder.clone();
-                Closure::<dyn FnMut(BlobEvent)>::new(move |event: BlobEvent| {
-                    let Some(data) = event.data() else { return };
-                    if data.size() <= 0.0 {
-                        return;
-                    }
-                    *total_bytes.borrow_mut() += data.size();
-                    chunks.borrow_mut().push(data);
-                    elapsed_secs.set(elapsed_secs.get_untracked() + 1);
-
-                    if *total_bytes.borrow() >= HARD_SIZE_LIMIT_BYTES
-                        && let Some(media_recorder) = active_recorder.borrow().as_ref()
-                    {
-                        stopped_notice.set(Some(
-                            "Stopped automatically — reached the 50MB size limit.".to_string(),
-                        ));
-                        let _ = media_recorder.stop();
-                    }
-                })
-            };
+            // Safe to capture `active_recorder` now even though
+            // `media_recorder` isn't stored in it until after `start()`
+            // succeeds below: a dataavailable event can't fire until at
+            // least one timeslice (1s) after that point, by which time the
+            // cell is already populated.
+            let on_data_available = on_data_available_closure(
+                chunks.clone(),
+                total_bytes.clone(),
+                active_recorder.clone(),
+                elapsed_secs,
+                stopped_notice,
+            );
             media_recorder.set_ondataavailable(Some(on_data_available.as_ref().unchecked_ref()));
             on_data_available.forget();
 
-            let on_stop = {
-                let chunks = chunks.clone();
-                let active_stream = active_stream.clone();
-                let mime_type = mime_type.to_string();
-                Closure::<dyn FnMut()>::new(move || {
-                    recording.set(false);
-
-                    let parts = js_sys::Array::new();
-                    for blob in chunks.borrow().iter() {
-                        parts.push(blob);
-                    }
-                    let blob_options = BlobPropertyBag::new();
-                    blob_options.set_type(&mime_type);
-                    let Ok(final_blob) =
-                        Blob::new_with_blob_sequence_and_options(&parts, &blob_options)
-                    else {
-                        stop_tracks(&active_stream);
-                        return;
-                    };
-
-                    if let Ok(url) = Url::create_object_url_with_blob(&final_blob) {
-                        preview_url.set(Some(url));
-                    }
-
-                    let file_options = FilePropertyBag::new();
-                    file_options.set_type(&mime_type);
-                    if let Ok(file) = File::new_with_blob_sequence_and_options(
-                        &js_sys::Array::of1(&final_blob),
-                        "recording.webm",
-                        &file_options,
-                    ) && let (Some(input), Ok(dt)) =
-                        (target_input.get_untracked(), DataTransfer::new())
-                    {
-                        let _ = dt.items().add_with_file(&file);
-                        input.set_files(dt.files().as_ref());
-                    }
-
-                    stop_tracks(&active_stream);
-                })
-            };
+            let on_stop = on_stop_closure(
+                chunks.clone(),
+                active_stream.clone(),
+                mime_type.to_string(),
+                target_input,
+                recording,
+                preview_url,
+            );
             media_recorder.set_onstop(Some(on_stop.as_ref().unchecked_ref()));
             on_stop.forget();
 

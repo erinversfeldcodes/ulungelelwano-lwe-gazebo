@@ -179,7 +179,7 @@ async fn upload_media_field(
     }
 }
 
-/// Extracts a YouTube video ID from any of the common share-link shapes
+/// Extracts a `YouTube` video ID from any of the common share-link shapes
 /// users actually paste (`youtube.com/watch?v=...`, `youtu.be/...`, and
 /// an already-canonical `youtube.com/embed/...`), rejecting anything else
 /// outright rather than silently storing an unplayable link. Deliberately
@@ -217,10 +217,10 @@ fn extract_youtube_video_id(input: &str) -> Option<&str> {
     is_plausible_id.then_some(id)
 }
 
-/// Normalizes whatever YouTube share link a user pasted into the one
+/// Normalizes whatever `YouTube` share link a user pasted into the one
 /// canonical embed-URL form the review/edit UI actually renders
 /// (`<iframe src=...>`), or an error message if it isn't recognizably a
-/// YouTube link at all.
+/// `YouTube` link at all.
 #[cfg(feature = "ssr")]
 fn youtube_embed_url(input: &str) -> Result<String, String> {
     extract_youtube_video_id(input)
@@ -228,7 +228,12 @@ fn youtube_embed_url(input: &str) -> Result<String, String> {
         .ok_or_else(|| "that doesn't look like a YouTube video link".to_string())
 }
 
+// Every bool here is an independent, orthogonal form flag (a value and its
+// own "remove this" checkbox, per media field) rather than a set of states
+// that could collapse into an enum, so the usual fix for this lint doesn't
+// apply cleanly.
 #[cfg(feature = "ssr")]
+#[allow(clippy::struct_excessive_bools)]
 struct CardFormFields {
     target_text: String,
     tags_raw: String,
@@ -252,7 +257,7 @@ struct CardFormFields {
 }
 
 /// Pulls every field out of a card create/edit form submission: text
-/// fields, the two_way checkbox, whichever of image/audio/video were
+/// fields, the `two_way` checkbox, whichever of image/audio/video were
 /// attached (each independent and optional — a card can have any
 /// combination, including none), and the edit form's "remove" checkboxes.
 #[cfg(feature = "ssr")]

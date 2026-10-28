@@ -14,10 +14,10 @@ pub struct CardRow {
     pub image_url: Option<String>,
     pub audio_url: Option<String>,
     pub video_url: Option<String>,
-    /// A YouTube embed URL (`https://www.youtube.com/embed/{id}`),
+    /// A `YouTube` embed URL (`https://www.youtube.com/embed/{id}`),
     /// already normalized at write time — never a raw `watch?v=`/`youtu.be`
     /// link, so rendering it is just `<iframe src=...>` with no further
-    /// parsing needed. Independent of `video_url`: a card links a YouTube
+    /// parsing needed. Independent of `video_url`: a card links a `YouTube`
     /// video instead of an uploaded/recorded one, not alongside it, though
     /// nothing stops both being set if a caller really wants that.
     pub youtube_url: Option<String>,
@@ -44,9 +44,9 @@ pub enum ReviewOrder {
 /// a property of one specific review-queue slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// Media (image/audio/video) shown first, target_text is the answer.
+    /// Media (image/audio/video) shown first, `target_text` is the answer.
     Forward,
-    /// target_text shown first, media is the answer.
+    /// `target_text` shown first, media is the answer.
     Reverse,
 }
 
@@ -249,7 +249,7 @@ async fn ensure_default_deck_in_tx(
 }
 
 /// `""` means "no media" at the API boundary (matching the pre-existing
-/// convention for image_url that audio_url/video_url now follow too), but
+/// convention for `image_url` that `audio_url`/`video_url` now follow too), but
 /// must become SQL NULL on the way in — otherwise `Option<String>` reads
 /// back as `Some("")`, not `None`, and the view's `.map()` on it renders
 /// an empty, controls-only `<audio>`/`<video>` player for a card that was
@@ -601,8 +601,8 @@ async fn due_review_cards(
 }
 
 /// Candidates never reviewed in a given direction: the existing
-/// media→target_text direction for every card, plus (for two-way cards
-/// only) the additional target_text→media direction. Each direction is
+/// `media→target_text` direction for every card, plus (for two-way cards
+/// only) the additional `target_text→media` direction. Each direction is
 /// independently "new" or not, so a two-way card can offer up to two new
 /// slots.
 async fn new_cards(
