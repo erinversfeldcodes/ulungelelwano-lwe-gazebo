@@ -43,9 +43,29 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Verify email delivery works
         run: |
-          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
-            https://gazebo.fly.dev/internal/email-check
+          # flyctl deploy blocks until the release reaches a good state, but
+          # the secrets sync above triggers its own separate restart — this
+          # can still land in a brief window where the machine is cycling,
+          # dropping the connection mid-request rather than reaching the
+          # app's own auth/validation logic. A real 401/403/422 still fails
+          # after exhausting retries, since curl -f only treats 2xx as success.
+          for attempt in 1 2 3 4 5; do
+            if curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+              https://gazebo.fly.dev/internal/email-check; then
+              exit 0
+            fi
+            echo "attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
+          exit 1
       - name: Verify storage upload works
         run: |
-          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
-            https://gazebo.fly.dev/internal/storage-check
+          for attempt in 1 2 3 4 5; do
+            if curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+              https://gazebo.fly.dev/internal/storage-check; then
+              exit 0
+            fi
+            echo "attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
+          exit 1

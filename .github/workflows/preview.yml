@@ -117,12 +117,33 @@ jobs:
           exit 1
       - name: Verify email delivery works
         run: |
-          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
-            "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/email-check"
+          # Same class of race as the EMAIL_FROM step above: setting that
+          # secret triggers its own machine restart, and this can land in
+          # the brief window while it's still replacing — dropping the
+          # connection mid-request ("connection closed before message
+          # completed") rather than actually reaching the app's own
+          # auth/validation logic. A real 401/403/422 still fails after
+          # exhausting retries, since curl -f only treats 2xx as success.
+          for attempt in 1 2 3 4 5; do
+            if curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+              "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/email-check"; then
+              exit 0
+            fi
+            echo "attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
+          exit 1
       - name: Verify storage upload works
         run: |
-          curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
-            "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/storage-check"
+          for attempt in 1 2 3 4 5; do
+            if curl -sf -H "Authorization: Bearer ${{ secrets.INTERNAL_CHECK_TOKEN }}" \
+              "https://gazebo-pr-${{ github.event.number }}.fly.dev/internal/storage-check"; then
+              exit 0
+            fi
+            echo "attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
+          exit 1
 
   e2e:
     name: Run E2E suite against preview
