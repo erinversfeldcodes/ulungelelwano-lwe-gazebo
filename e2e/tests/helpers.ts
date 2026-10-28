@@ -4,10 +4,17 @@ import { Page, expect } from "@playwright/test";
 // Resend's sandbox sender (onboarding@resend.dev) rather than a verified
 // custom domain. That sandbox rejects any recipient other than the
 // account owner's own exact address — no aliases, no other domains, not
-// even "@example.com" — so any e2e test that triggers a real magic-link
-// send (not just the DB-bypassing token lookup in auth.setup.ts) must
-// target this literal address rather than a unique per-run one.
+// even "@example.com" — so any e2e test that triggers a real email send
+// (password-reset requests, now that magic-link is gone) must target this
+// literal address rather than a unique per-run one.
 export const RESEND_ALLOWED_EMAIL = "erinversfeld@gmail.com";
+
+// The fixed password for RESEND_ALLOWED_EMAIL's account. auth.setup.ts
+// signs up with it on a fresh database and logs in with it otherwise
+// (password auth rejects a repeat signup for an email that already
+// exists), so every other spec file's storageState depends on this exact
+// value staying in sync with whatever auth.setup.ts actually set.
+export const TEST_PASSWORD = "correct-horse-battery-staple";
 
 export function uniqueWord(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;

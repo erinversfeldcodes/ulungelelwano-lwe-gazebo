@@ -30,12 +30,66 @@ async fn require_user() -> Result<crate::auth::UserRow, ServerFnError> {
         .map_err(ServerFnError::new)
 }
 
+#[cfg(feature = "ssr")]
+async fn session_cookies() -> Result<tower_cookies::Cookies, ServerFnError> {
+    leptos_axum::extract::<tower_cookies::Cookies>()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
 #[server]
-pub async fn request_magic_link(email: String) -> Result<(), ServerFnError> {
+pub async fn sign_up(
+    email: String,
+    name: String,
+    password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if password != confirm_password {
+        return Err(ServerFnError::new("passwords do not match"));
+    }
+    let state = expect_context::<crate::state::AppState>();
+    let session_token = crate::auth::sign_up(&state.db_pool, &email, &name, &password)
+        .await
+        .map_err(ServerFnError::new)?;
+    session_cookies()
+        .await?
+        .add(crate::auth::build_session_cookie(session_token));
+    Ok(())
+}
+
+#[server]
+pub async fn log_in(email: String, password: String) -> Result<(), ServerFnError> {
+    let state = expect_context::<crate::state::AppState>();
+    let session_token = crate::auth::log_in(&state.db_pool, &email, &password)
+        .await
+        .map_err(ServerFnError::new)?;
+    session_cookies()
+        .await?
+        .add(crate::auth::build_session_cookie(session_token));
+    Ok(())
+}
+
+#[server]
+pub async fn request_password_reset(email: String) -> Result<(), ServerFnError> {
     let state = expect_context::<crate::state::AppState>();
     let base_url =
         std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-    crate::auth::request_magic_link(&state.db_pool, &state.email_sender, &base_url, &email)
+    crate::auth::request_password_reset(&state.db_pool, &state.email_sender, &base_url, &email)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+#[server]
+pub async fn confirm_password_reset(
+    token: String,
+    password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if password != confirm_password {
+        return Err(ServerFnError::new("passwords do not match"));
+    }
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::confirm_password_reset(&state.db_pool, &token, &password)
         .await
         .map_err(ServerFnError::new)
 }

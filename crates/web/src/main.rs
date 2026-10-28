@@ -11,34 +11,6 @@ async fn health(
     }
 }
 
-#[cfg(feature = "ssr")]
-#[derive(serde::Deserialize)]
-struct VerifyQuery {
-    token: String,
-}
-
-#[cfg(feature = "ssr")]
-async fn auth_verify(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    cookies: tower_cookies::Cookies,
-    axum::extract::Query(query): axum::extract::Query<VerifyQuery>,
-) -> axum::response::Redirect {
-    match web::auth::verify_login_token(&state.db_pool, &query.token).await {
-        Ok(session_token) => {
-            let cookie = tower_cookies::Cookie::build((web::auth::SESSION_COOKIE, session_token))
-                .path("/")
-                .http_only(true)
-                .secure(true)
-                .same_site(tower_cookies::cookie::SameSite::Lax)
-                .max_age(tower_cookies::cookie::time::Duration::days(30))
-                .build();
-            cookies.add(cookie);
-            axum::response::Redirect::to("/")
-        }
-        Err(_) => axum::response::Redirect::to("/login"),
-    }
-}
-
 /// Hit by CI right after every deploy (prod and PR previews) to prove the
 /// Resend integration actually works end to end — not a liveness probe, so
 /// it's deliberately not wired into fly.toml's automatic health checks,
@@ -337,7 +309,6 @@ async fn main() {
             move || shell(leptos_options.clone())
         })
         .route("/health", axum::routing::get(health))
-        .route("/auth/verify", axum::routing::get(auth_verify))
         .route("/auth/logout", axum::routing::get(auth_logout))
         .route("/internal/email-check", axum::routing::get(email_check))
         .route("/internal/storage-check", axum::routing::get(storage_check))

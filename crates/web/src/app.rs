@@ -2,7 +2,10 @@
 // pedantic must_use_candidate doesn't see through the macro expansion.
 #![allow(clippy::must_use_candidate)]
 
-use crate::account::{RequestMagicLink, SetDailyNewCardLimit, current_user_name, user_stats};
+use crate::account::{
+    ConfirmPasswordReset, LogIn, RequestPasswordReset, SetDailyNewCardLimit, SignUp,
+    current_user_name, user_stats,
+};
 use crate::cards::{
     DeleteCard, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags, review_queue,
 };
@@ -14,7 +17,7 @@ use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::{
     StaticSegment,
     components::{A, Redirect, Route, Router, Routes},
-    hooks::{use_navigate, use_params_map},
+    hooks::{use_navigate, use_params_map, use_query_map},
     path,
 };
 use uuid::Uuid;
@@ -61,7 +64,10 @@ pub fn App() -> impl IntoView {
                                 " · "<A href="/settings">"Settings"</A>
                                 " · "<a href="/auth/logout">"Sign out"</a>
                             }.into_any(),
-                            None => view! { " · "<A href="/login">"Sign in"</A> }.into_any(),
+                            None => view! {
+                                " · "<A href="/login">"Sign in"</A>
+                                " · "<A href="/signup">"Sign up"</A>
+                            }.into_any(),
                         }
                     })}
                 </Transition>
@@ -76,30 +82,137 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("stats") view=StatsPage/>
                     <Route path=StaticSegment("settings") view=SettingsPage/>
                     <Route path=StaticSegment("login") view=LoginPage/>
+                    <Route path=StaticSegment("signup") view=SignupPage/>
+                    <Route path=StaticSegment("forgot-password") view=ForgotPasswordPage/>
+                    <Route path=StaticSegment("reset-password") view=ResetPasswordPage/>
                 </Routes>
             </main>
         </Router>
     }
 }
 
+/// Signup/login both end by setting a session cookie server-side and then
+/// need the browser to actually pick it up. A client-side route change
+/// (`use_navigate`, as `EditCardPage` uses after a delete) wouldn't do
+/// that: `App`'s top-level nav `Resource` was already fetched once at
+/// mount and a SPA-style transition never re-runs it. A full top-level
+/// navigation does, so this deliberately uses a real browser navigation
+/// rather than the router.
+fn reload_to(path: &str) {
+    _ = window().location().set_href(path);
+}
+
 #[component]
 fn LoginPage() -> impl IntoView {
-    let send_link = ServerAction::<RequestMagicLink>::new();
+    let log_in = ServerAction::<LogIn>::new();
+    let query = use_query_map();
+    let just_reset = move || query.read().get("reset").as_deref() == Some("success");
+
+    Effect::new(move |_| {
+        if matches!(log_in.value().get(), Some(Ok(()))) {
+            reload_to("/");
+        }
+    });
 
     view! {
         <h1>"Sign in"</h1>
-        <ActionForm action=send_link>
+        {move || just_reset().then(|| view! {
+            <p>"Password updated — sign in with your new password."</p>
+        })}
+        <ActionForm action=log_in>
             <label>"Email" <input type="email" name="email" /></label>
-            <button type="submit">"Send magic link"</button>
+            <label>"Password" <input type="password" name="password" /></label>
+            <button type="submit">"Sign in"</button>
         </ActionForm>
         {move || {
-            send_link
+            log_in.value().get().and_then(Result::err).map(|e| {
+                view! { <p>"Error: " {e.to_string()}</p> }
+            })
+        }}
+        <p><A href="/signup">"Need an account? Sign up"</A></p>
+        <p><A href="/forgot-password">"Forgot your password?"</A></p>
+    }
+}
+
+#[component]
+fn SignupPage() -> impl IntoView {
+    let sign_up = ServerAction::<SignUp>::new();
+
+    Effect::new(move |_| {
+        if matches!(sign_up.value().get(), Some(Ok(()))) {
+            reload_to("/");
+        }
+    });
+
+    view! {
+        <h1>"Sign up"</h1>
+        <ActionForm action=sign_up>
+            <label>"Name" <input type="text" name="name" /></label>
+            <label>"Email" <input type="email" name="email" /></label>
+            <label>"Password" <input type="password" name="password" /></label>
+            <label>"Confirm password" <input type="password" name="confirm_password" /></label>
+            <button type="submit">"Sign up"</button>
+        </ActionForm>
+        {move || {
+            sign_up.value().get().and_then(Result::err).map(|e| {
+                view! { <p>"Error: " {e.to_string()}</p> }
+            })
+        }}
+        <p><A href="/login">"Already have an account? Sign in"</A></p>
+    }
+}
+
+#[component]
+fn ForgotPasswordPage() -> impl IntoView {
+    let request_reset = ServerAction::<RequestPasswordReset>::new();
+
+    view! {
+        <h1>"Forgot your password?"</h1>
+        <ActionForm action=request_reset>
+            <label>"Email" <input type="email" name="email" /></label>
+            <button type="submit">"Send reset link"</button>
+        </ActionForm>
+        {move || {
+            request_reset
                 .value()
                 .get()
                 .map(|result| match result {
-                    Ok(()) => view! { <p>"Check your email for a sign-in link."</p> }.into_any(),
+                    Ok(()) => view! {
+                        <p>"If an account with that email exists, we've sent a password reset link."</p>
+                    }.into_any(),
                     Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
                 })
+        }}
+    }
+}
+
+#[component]
+fn ResetPasswordPage() -> impl IntoView {
+    let confirm_reset = ServerAction::<ConfirmPasswordReset>::new();
+    let query = use_query_map();
+    let token = move || query.read().get("token").unwrap_or_default();
+
+    Effect::new(move |_| {
+        if matches!(confirm_reset.value().get(), Some(Ok(()))) {
+            reload_to("/login?reset=success");
+        }
+    });
+
+    view! {
+        <h1>"Reset your password"</h1>
+        {move || {
+            token().is_empty().then(|| view! { <p>"This password reset link is invalid."</p> })
+        }}
+        <ActionForm action=confirm_reset>
+            <input type="hidden" name="token" value=token() />
+            <label>"New password" <input type="password" name="password" /></label>
+            <label>"Confirm new password" <input type="password" name="confirm_password" /></label>
+            <button type="submit">"Reset password"</button>
+        </ActionForm>
+        {move || {
+            confirm_reset.value().get().and_then(Result::err).map(|e| {
+                view! { <p>"Error: " {e.to_string()}</p> }
+            })
         }}
     }
 }

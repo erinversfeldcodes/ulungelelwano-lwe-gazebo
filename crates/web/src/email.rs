@@ -43,8 +43,8 @@ impl EmailSender {
         }
     }
 
-    pub async fn send_magic_link(&self, to: &str, link: &str) -> Result<(), String> {
-        self.send(to, "Sign in to Gazebo", &magic_link_html(link))
+    pub async fn send_password_reset(&self, to: &str, link: &str) -> Result<(), String> {
+        self.send(to, "Reset your Gazebo password", &password_reset_html(link))
             .await
     }
 
@@ -52,8 +52,8 @@ impl EmailSender {
     /// Resend integration actually works end to end — see
     /// `/internal/email-check`, which CI hits right after every deploy.
     ///
-    /// Unlike `send_magic_link`, Console mode is a *failure* here, not a
-    /// fallback: the whole point of this call is to prove real delivery
+    /// Unlike `send_password_reset`, Console mode is a *failure* here, not
+    /// a fallback: the whole point of this call is to prove real delivery
     /// works, so silently logging instead would make the deploy check
     /// pass even when `RESEND_API_KEY` is missing in an environment that's
     /// supposed to send real email.
@@ -106,10 +106,10 @@ impl EmailSender {
 
 const TEST_EMAIL_HTML: &str = "<p>Automated deployment check for Gazebo — nothing to do here.</p>";
 
-fn magic_link_html(link: &str) -> String {
+fn password_reset_html(link: &str) -> String {
     format!(
-        "<p>Click to sign in to Gazebo:</p><p><a href=\"{link}\">{link}</a></p>\
-         <p>This link expires in 30 minutes.</p>"
+        "<p>Click to reset your Gazebo password:</p><p><a href=\"{link}\">{link}</a></p>\
+         <p>This link expires in 24 hours. If you didn't request this, you can ignore it.</p>"
     )
 }
 
@@ -120,9 +120,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn magic_link_email_body_snapshot() {
-        insta::assert_snapshot!(magic_link_html(
-            "https://gazebo.fly.dev/auth/verify?token=abc123"
+    fn password_reset_email_body_snapshot() {
+        insta::assert_snapshot!(password_reset_html(
+            "https://gazebo.fly.dev/reset-password?token=abc123"
         ));
     }
 
@@ -132,11 +132,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn console_send_magic_link_always_succeeds() {
+    async fn console_send_password_reset_always_succeeds() {
         let result = EmailSender::Console
-            .send_magic_link(
+            .send_password_reset(
                 "someone@example.com",
-                "https://example.com/verify?token=abc",
+                "https://example.com/reset-password?token=abc",
             )
             .await;
         assert!(result.is_ok());
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resend_send_magic_link_hits_the_configured_endpoint() {
+    async fn resend_send_password_reset_hits_the_configured_endpoint() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/emails"))
@@ -163,9 +163,9 @@ mod tests {
 
         let sender = EmailSender::test_resend(format!("{}/emails", server.uri()));
         let result = sender
-            .send_magic_link(
+            .send_password_reset(
                 "someone@example.com",
-                "https://example.com/verify?token=abc",
+                "https://example.com/reset-password?token=abc",
             )
             .await;
         assert!(result.is_ok());

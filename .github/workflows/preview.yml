@@ -152,9 +152,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BASE_URL: https://gazebo-pr-${{ github.event.number }}.fly.dev
-      # The preview's own Neon branch — auth.setup.ts reads the magic-link
-      # token directly from it (same trick it uses against local Postgres),
-      # bypassing the need to actually receive an email.
+      # The preview's own Neon branch — auth.setup.ts connects to it
+      # directly (same as it does against local Postgres) to clear the
+      # test account's daily new-card limit after signing in.
       DATABASE_URL: postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
     steps:
       - uses: actions/checkout@v7
