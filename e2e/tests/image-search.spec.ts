@@ -2,14 +2,15 @@ import { test, expect } from "./fixtures";
 import { uniqueWord } from "./helpers";
 
 // This file deliberately never asserts on real Pixabay/Openverse search
-// *content* — only Openverse needs no key, so it's the only provider
-// this suite could realistically hit even in CI, and asserting on a
-// third party's live catalog would make these tests flaky against
-// something nobody here controls. What's actually load-bearing to test
-// locally: the English field structurally can't be submitted as part of
-// the card (see app.rs's ImageSearchPicker — it has no `name` attribute
-// at all), and the search UI resolves out of "Searching…" into some
-// terminal state rather than hanging forever.
+// *content* in the tests below — asserting on a third party's live
+// catalog would make these tests flaky against something nobody here
+// controls, and neither provider works reliably without its own
+// credentials configured wherever this runs anyway (see the comment
+// further down). What's actually load-bearing to test locally: the
+// English field structurally can't be submitted as part of the card (see
+// app.rs's ImageSearchPicker — it has no `name` attribute at all), and
+// the search UI resolves out of "Searching…" into some terminal state
+// rather than hanging forever.
 
 test("the English translation field is not a submittable form field", async ({ page }) => {
   await page.goto("/new");
@@ -53,14 +54,18 @@ test("a card saved without using image search carries no trace of the English te
 });
 
 // Unlike every test above, these two deliberately DO depend on reaching
-// the real Pixabay/Openverse APIs (PIXABAY_API_KEY must be set wherever
-// this runs) and on real storage being configured (so import_card_image
-// can actually complete) — on purpose. A provider that's down,
-// rate-limited, or has changed its response shape, or a picked image that
-// silently fails to persist, should fail these tests and block a merge,
-// not be worked around with a mock. See image_search.rs's
-// real_providers_all_respond_to_a_search for the equivalent check at the
-// Rust level (search only, no browser/storage needed there).
+// the real Pixabay/Openverse APIs (PIXABAY_API_KEY and
+// OPENVERSE_CLIENT_ID/OPENVERSE_CLIENT_SECRET must be set wherever this
+// runs — anonymous Openverse access is rate-limited per source IP and is
+// NOT reliable on shared CI runners, see image_search.rs's doc comment
+// on ImageSearch) and on real storage being configured (so
+// import_card_image can actually complete) — on purpose. A provider
+// that's down, rate-limited, or has changed its response shape, or a
+// picked image that silently fails to persist, should fail these tests
+// and block a merge, not be worked around with a mock. See
+// image_search.rs's real_providers_all_respond_to_a_search for the
+// equivalent check at the Rust level (search only, no browser/storage
+// needed there).
 
 test("search returns real results from both providers", async ({ page }) => {
   await page.goto("/new");
@@ -90,10 +95,10 @@ test("picking a real search result renders on the card and survives a reload", a
   await page.getByRole("button", { name: "Search images" }).click();
   await expect(page.getByText("Searching…")).not.toBeVisible({ timeout: 20_000 });
 
-  // Openverse specifically: no API key needed to search it, so a picked
-  // Openverse result isolates whether import_card_image itself (the
-  // fetch-by-id + re-upload to our own storage) works, separately from
-  // whether the Pixabay credential is valid.
+  // Openverse specifically, rather than Pixabay: isolates whether
+  // import_card_image itself (the fetch-by-id + re-upload to our own
+  // storage) works, separately from whether the Pixabay credential is
+  // valid.
   const thumb = page.locator('img.image-search-thumb[data-provider="openverse"]').first();
   await expect(thumb).toBeVisible();
   await thumb.click();
