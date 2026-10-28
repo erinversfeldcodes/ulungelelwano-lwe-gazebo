@@ -2,7 +2,12 @@ import { test as setup, expect } from "@playwright/test";
 import { Client } from "pg";
 import * as fs from "fs";
 
-const TEST_EMAIL = "e2e@example.com";
+// Must be exactly the Resend account owner's own address: the sandbox
+// sender (onboarding@resend.dev, used in preview/local) rejects any other
+// recipient outright — including "@example.com", which Resend blocks by
+// name — so request_magic_link's send step would 422 before the UI ever
+// reaches the "check your email" state, regardless of the DB layer.
+const TEST_EMAIL = "erinversfeld@gmail.com";
 
 // Bypasses the slow part (actually receiving an email) the same way
 // ~/thestacks' Playwright auth setup bypasses its own login UI: drive the
