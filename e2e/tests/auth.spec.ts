@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { RESEND_ALLOWED_EMAIL } from "./helpers";
 
 // Runs signed out, deliberately ignoring the project's saved auth state.

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { uniqueWord, withServerResponse } from "./helpers";
 
 test("creating a deck and assigning a card to it scopes the card list filter", async ({ page }) => {

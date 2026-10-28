@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { withServerResponse } from "./helpers";
 
 // Deliberately saves a large limit, not a small one: the daily new-card cap

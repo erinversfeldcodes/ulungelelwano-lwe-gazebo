@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { uniqueWord } from "./helpers";
 
 test("creating a card shows it in the shared card list", async ({ page }) => {
