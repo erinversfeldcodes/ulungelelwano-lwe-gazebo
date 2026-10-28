@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { createCardInOwnDeck, reviewOwnCard } from "./helpers";
 
 // total_cards and reviews_today are shared-pool aggregates, so other specs

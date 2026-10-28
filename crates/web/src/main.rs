@@ -311,6 +311,19 @@ async fn main() {
         .await
         .expect("failed to connect to the database");
 
+    // Embedded at compile time (no runtime file access needed, so this
+    // works unchanged in the minimal Docker runtime image) and applied on
+    // every boot. Neither `preview.yml` nor `deploy.yml` ever ran
+    // migrations against the real Neon branches they target — only
+    // `ci.yml`'s ephemeral local Postgres got them — so staging and
+    // production both still had zero tables despite "successful" deploys.
+    // Idempotent via sqlx's own tracking table, so this is safe to run
+    // alongside that pre-existing CI step too.
+    sqlx::migrate!("../../migrations")
+        .run(&db_pool)
+        .await
+        .expect("failed to run database migrations");
+
     let state = AppState {
         leptos_options: leptos_options.clone(),
         db_pool,

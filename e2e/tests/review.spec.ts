@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { uniqueWord, createCardInOwnDeck, reviewOwnCard } from "./helpers";
 
 test("grading a due card removes it from today's review queue", async ({ page }) => {

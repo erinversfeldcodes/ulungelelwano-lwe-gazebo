@@ -1,8 +1,9 @@
-import { test as setup, expect } from "@playwright/test";
+import { test as setup, expect } from "./fixtures";
 import { Client } from "pg";
 import * as fs from "fs";
+import { RESEND_ALLOWED_EMAIL } from "./helpers";
 
-const TEST_EMAIL = "e2e@example.com";
+const TEST_EMAIL = RESEND_ALLOWED_EMAIL;
 
 // Bypasses the slow part (actually receiving an email) the same way
 // ~/thestacks' Playwright auth setup bypasses its own login UI: drive the
