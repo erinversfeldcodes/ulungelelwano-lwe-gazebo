@@ -14,6 +14,13 @@ pub struct CardRow {
     pub image_url: Option<String>,
     pub audio_url: Option<String>,
     pub video_url: Option<String>,
+    /// A YouTube embed URL (`https://www.youtube.com/embed/{id}`),
+    /// already normalized at write time — never a raw `watch?v=`/`youtu.be`
+    /// link, so rendering it is just `<iframe src=...>` with no further
+    /// parsing needed. Independent of `video_url`: a card links a YouTube
+    /// video instead of an uploaded/recorded one, not alongside it, though
+    /// nothing stops both being set if a caller really wants that.
+    pub youtube_url: Option<String>,
     pub target_text: String,
     pub two_way: bool,
 }
@@ -68,6 +75,7 @@ pub struct ReviewQueueCard {
     pub image_url: Option<String>,
     pub audio_url: Option<String>,
     pub video_url: Option<String>,
+    pub youtube_url: Option<String>,
     pub target_text: String,
     pub direction: Direction,
 }
@@ -78,6 +86,7 @@ struct ReviewQueueCardRow {
     image_url: Option<String>,
     audio_url: Option<String>,
     video_url: Option<String>,
+    youtube_url: Option<String>,
     target_text: String,
     direction: String,
 }
@@ -89,6 +98,7 @@ impl From<ReviewQueueCardRow> for ReviewQueueCard {
             image_url: row.image_url,
             audio_url: row.audio_url,
             video_url: row.video_url,
+            youtube_url: row.youtube_url,
             target_text: row.target_text,
             direction: Direction::from_db(&row.direction),
         }
@@ -132,11 +142,17 @@ pub struct NewCard<'a> {
     pub image_url: &'a str,
     pub audio_url: &'a str,
     pub video_url: &'a str,
+    /// Must already be a normalized `https://www.youtube.com/embed/{id}`
+    /// URL — callers are responsible for parsing/validating whatever the
+    /// user actually pasted before this point (see
+    /// `main.rs::youtube_embed_url`).
+    pub youtube_url: &'a str,
     pub target_text: &'a str,
     pub two_way: bool,
 }
 
-const CARD_COLUMNS: &str = "c.id, c.image_url, c.audio_url, c.video_url, c.target_text, c.two_way";
+const CARD_COLUMNS: &str =
+    "c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, c.two_way";
 
 // --- cards --------------------------------------------------------------
 
@@ -251,12 +267,13 @@ pub async fn create_card(
     let mut tx = pool.begin().await?;
 
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO cards (card_type, image_url, audio_url, video_url, target_text, two_way, created_by) \
-         VALUES ('image_to_target', $1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO cards (card_type, image_url, audio_url, video_url, youtube_url, target_text, two_way, created_by) \
+         VALUES ('image_to_target', $1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(non_empty(card.image_url))
     .bind(non_empty(card.audio_url))
     .bind(non_empty(card.video_url))
+    .bind(non_empty(card.youtube_url))
     .bind(card.target_text)
     .bind(card.two_way)
     .bind(created_by)
@@ -285,12 +302,13 @@ pub async fn update_card(
     let mut tx = pool.begin().await?;
 
     sqlx::query(
-        "UPDATE cards SET image_url = $1, audio_url = $2, video_url = $3, \
-         target_text = $4, two_way = $5 WHERE id = $6",
+        "UPDATE cards SET image_url = $1, audio_url = $2, video_url = $3, youtube_url = $4, \
+         target_text = $5, two_way = $6 WHERE id = $7",
     )
     .bind(non_empty(card.image_url))
     .bind(non_empty(card.audio_url))
     .bind(non_empty(card.video_url))
+    .bind(non_empty(card.youtube_url))
     .bind(card.target_text)
     .bind(card.two_way)
     .bind(card_id)
@@ -556,7 +574,7 @@ async fn due_review_cards(
 
     let rows: Vec<ReviewQueueCardRow> = if let Some(deck_id) = deck_id {
         let sql = format!(
-            "SELECT c.id, c.image_url, c.audio_url, c.video_url, c.target_text, rs.direction \
+            "SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, rs.direction \
              FROM cards c \
              JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
              JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $2 \
@@ -569,7 +587,7 @@ async fn due_review_cards(
             .await?
     } else {
         let sql = format!(
-            "SELECT c.id, c.image_url, c.audio_url, c.video_url, c.target_text, rs.direction \
+            "SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, rs.direction \
              FROM cards c \
              JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
              WHERE rs.due_at <= now() ORDER BY {order_clause}"
@@ -598,15 +616,15 @@ async fn new_cards(
     }
     let rows: Vec<ReviewQueueCardRow> = if let Some(deck_id) = deck_id {
         sqlx::query_as(
-            "SELECT id, image_url, audio_url, video_url, target_text, direction FROM ( \
-                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.target_text, \
+            "SELECT id, image_url, audio_url, video_url, youtube_url, target_text, direction FROM ( \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
                         'forward' AS direction, c.created_at AS sort_key \
                  FROM cards c \
                  JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $3 \
                  LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 AND rs.direction = 'forward' \
                  WHERE rs.card_id IS NULL \
                  UNION ALL \
-                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.target_text, \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
                         'reverse' AS direction, c.created_at AS sort_key \
                  FROM cards c \
                  JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $3 \
@@ -621,14 +639,14 @@ async fn new_cards(
         .await?
     } else {
         sqlx::query_as(
-            "SELECT id, image_url, audio_url, video_url, target_text, direction FROM ( \
-                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.target_text, \
+            "SELECT id, image_url, audio_url, video_url, youtube_url, target_text, direction FROM ( \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
                         'forward' AS direction, c.created_at AS sort_key \
                  FROM cards c \
                  LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 AND rs.direction = 'forward' \
                  WHERE rs.card_id IS NULL \
                  UNION ALL \
-                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.target_text, \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
                         'reverse' AS direction, c.created_at AS sort_key \
                  FROM cards c \
                  LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 AND rs.direction = 'reverse' \
@@ -890,6 +908,7 @@ mod tests {
             NewCard {
                 audio_url: "audio.mp3",
                 video_url: "video.mp4",
+                youtube_url: "https://www.youtube.com/embed/dQw4w9WgXcQ",
                 target_text: "word",
                 two_way: true,
                 ..Default::default()
@@ -902,6 +921,10 @@ mod tests {
         let card = get_card(&pool, card_id).await.unwrap().unwrap();
         assert_eq!(card.audio_url, Some("audio.mp3".to_string()));
         assert_eq!(card.video_url, Some("video.mp4".to_string()));
+        assert_eq!(
+            card.youtube_url,
+            Some("https://www.youtube.com/embed/dQw4w9WgXcQ".to_string())
+        );
         assert!(card.two_way);
     }
 

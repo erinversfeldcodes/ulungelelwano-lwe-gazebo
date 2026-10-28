@@ -64,6 +64,67 @@ test("removing an attached recording clears it from the card", async ({ page }) 
   await expect(page.getByLabel("Remove audio")).not.toBeVisible();
 });
 
+test("linking a YouTube video attaches a playable embed to a new card", async ({ page }) => {
+  const word = uniqueWord("media-spec-youtube");
+
+  await page.goto("/new");
+  await page.getByLabel("Target-language word/phrase").fill(word);
+  await page
+    .getByLabel("Or link a YouTube video")
+    .fill("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxyz");
+  await page.getByRole("button", { name: "Add" }).click();
+  await expect(page).toHaveURL("/");
+
+  await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
+  // Asserts the normalized embed src rather than that the video actually
+  // plays, which would make this test dependent on a specific video
+  // staying available/embeddable on YouTube's own service. This is what
+  // main.rs's youtube_embed_url is actually responsible for: pulling the
+  // id out regardless of extra query params like the &list= above
+  // (covered more exhaustively by its own unit tests in main.rs).
+  await expect(page.locator("iframe")).toHaveAttribute(
+    "src",
+    "https://www.youtube.com/embed/dQw4w9WgXcQ",
+  );
+});
+
+test("removing a linked YouTube video clears it from the card", async ({ page }) => {
+  const word = uniqueWord("media-spec-youtube-remove");
+
+  await page.goto("/new");
+  await page.getByLabel("Target-language word/phrase").fill(word);
+  await page.getByLabel("Or link a YouTube video").fill("https://youtu.be/dQw4w9WgXcQ");
+  await page.getByRole("button", { name: "Add" }).click();
+  await expect(page).toHaveURL("/");
+
+  await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
+  await expect(page.locator("iframe")).toBeVisible();
+
+  await page.getByLabel("Remove YouTube link").check();
+  await page.getByRole("button", { name: "Save" }).click();
+
+  await expect(page).toHaveURL(/\/cards\/[0-9a-f-]+$/);
+  await expect(page.locator("iframe")).not.toBeVisible();
+  // The removal checkbox itself only appears when there's something to
+  // remove (see app.rs) — gone now, same as the embed.
+  await expect(page.getByLabel("Remove YouTube link")).not.toBeVisible();
+});
+
+test("linking a non-YouTube video shows an error, not a silent failure", async ({ page }) => {
+  const word = uniqueWord("media-spec-youtube-invalid");
+
+  await page.goto("/new");
+  await page.getByLabel("Target-language word/phrase").fill(word);
+  await page.getByLabel("Or link a YouTube video").fill("https://vimeo.com/123456");
+  await page.getByRole("button", { name: "Add" }).click();
+
+  await expect(page.getByText("that doesn't look like a YouTube video link")).toBeVisible();
+  // The whole submission was rejected, not just the YouTube field
+  // silently dropped — the card was never created at all.
+  await page.goto("/");
+  await expect(page.getByText(word, { exact: true })).not.toBeVisible();
+});
+
 test("a two-way card is reviewed in both directions, independently", async ({ page }) => {
   const word = uniqueWord("media-spec-two-way");
   const deckName = uniqueWord("media-spec-two-way-deck");

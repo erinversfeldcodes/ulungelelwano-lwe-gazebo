@@ -22,6 +22,16 @@ use leptos_router::{
 };
 use uuid::Uuid;
 
+/// `card.youtube_url` is always already a normalized
+/// `youtube.com/embed/{id}` URL by the time it reaches here (validated
+/// and canonicalized server-side in main.rs, never the raw link a user
+/// pasted), so this is just the embed markup — no parsing needed. Shared
+/// across the card list, card detail, and review pages rather than
+/// repeated, since it's the exact same three attributes everywhere.
+fn youtube_embed(url: String) -> impl IntoView {
+    view! { <iframe src=url width="560" height="315" allowfullscreen=true></iframe> }
+}
+
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -177,6 +187,7 @@ fn CardListPage() -> impl IntoView {
                                             {card
                                                 .video_url
                                                 .map(|url| view! { <video controls src=url></video> })}
+                                            {card.youtube_url.map(youtube_embed)}
                                             <span>{card.target_text}</span>
                                             " "
                                             <A href=edit_href>"Edit"</A>
@@ -220,6 +231,14 @@ fn NewCardPage() -> impl IntoView {
                             <input type="file" name="video" accept="video/*" node_ref=video_input />
                         </label>
                         <RecordButton kind="video" target_input=video_input />
+                        <label>
+                            "Or link a YouTube video"
+                            <input
+                                type="url"
+                                name="youtube_url"
+                                placeholder="https://www.youtube.com/watch?v=..."
+                            />
+                        </label>
                         <label>"Target-language word/phrase" <input type="text" name="target_text" /></label>
                         <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
                         <label>
@@ -292,6 +311,7 @@ fn EditCardPage() -> impl IntoView {
                             .video_url
                             .clone()
                             .map(|url| view! { <video controls src=url></video> });
+                        let youtube_view = detail.youtube_url.clone().map(youtube_embed);
                         let deck_ids = detail.deck_ids.clone();
 
                         // Anyone can view a card; only a signed-in user sees
@@ -330,6 +350,12 @@ fn EditCardPage() -> impl IntoView {
                                     "Remove video"
                                 </label>
                             });
+                            let remove_youtube = detail.youtube_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_youtube" />
+                                    "Remove YouTube link"
+                                </label>
+                            });
                             view! {
                                 <form method="post" action=action enctype="multipart/form-data">
                                     <label>
@@ -349,6 +375,15 @@ fn EditCardPage() -> impl IntoView {
                                     </label>
                                     <RecordButton kind="video" target_input=video_input />
                                     {remove_video}
+                                    <label>
+                                        "Replace YouTube link (optional)"
+                                        <input
+                                            type="url"
+                                            name="youtube_url"
+                                            placeholder="https://www.youtube.com/watch?v=..."
+                                        />
+                                    </label>
+                                    {remove_youtube}
                                     <label>
                                         "Target-language word/phrase"
                                         <input type="text" name="target_text" value=detail.target_text.clone() />
@@ -431,6 +466,7 @@ fn EditCardPage() -> impl IntoView {
                                 {image_view}
                                 {audio_view}
                                 {video_view}
+                                {youtube_view}
                                 {read_only_info}
                             </div>
                             {edit_form}
@@ -593,6 +629,7 @@ fn ReviewPage() -> impl IntoView {
                                     {card.image_url.map(|url| view! { <img src=url alt="" /> })}
                                     {card.audio_url.map(|url| view! { <audio controls src=url></audio> })}
                                     {card.video_url.map(|url| view! { <video controls src=url></video> })}
+                                    {card.youtube_url.map(youtube_embed)}
                                 }
                                 .into_any();
                                 // Forward: media is the prompt, target_text the

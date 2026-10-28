@@ -8,6 +8,7 @@ pub struct Card {
     pub image_url: Option<String>,
     pub audio_url: Option<String>,
     pub video_url: Option<String>,
+    pub youtube_url: Option<String>,
     pub target_text: String,
     pub two_way: bool,
 }
@@ -18,6 +19,7 @@ pub struct CardDetail {
     pub image_url: Option<String>,
     pub audio_url: Option<String>,
     pub video_url: Option<String>,
+    pub youtube_url: Option<String>,
     pub target_text: String,
     pub two_way: bool,
     pub tags: Vec<String>,
@@ -59,6 +61,7 @@ pub struct ReviewCard {
     pub image_url: Option<String>,
     pub audio_url: Option<String>,
     pub video_url: Option<String>,
+    pub youtube_url: Option<String>,
     pub target_text: String,
     pub direction: DirectionInput,
 }
@@ -136,6 +139,7 @@ pub async fn list_cards(
             image_url: r.image_url,
             audio_url: r.audio_url,
             video_url: r.video_url,
+            youtube_url: r.youtube_url,
             target_text: r.target_text,
             two_way: r.two_way,
         })
@@ -170,6 +174,7 @@ pub async fn get_card(card_id: Uuid) -> Result<Option<CardDetail>, ServerFnError
         image_url: card.image_url,
         audio_url: card.audio_url,
         video_url: card.video_url,
+        youtube_url: card.youtube_url,
         target_text: card.target_text,
         two_way: card.two_way,
         tags,
@@ -206,6 +211,7 @@ pub async fn review_queue(
                 image_url: r.image_url,
                 audio_url: r.audio_url,
                 video_url: r.video_url,
+                youtube_url: r.youtube_url,
                 target_text: r.target_text,
                 direction: r.direction.into(),
             })

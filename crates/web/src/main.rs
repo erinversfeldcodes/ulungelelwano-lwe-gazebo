@@ -179,6 +179,55 @@ async fn upload_media_field(
     }
 }
 
+/// Extracts a YouTube video ID from any of the common share-link shapes
+/// users actually paste (`youtube.com/watch?v=...`, `youtu.be/...`, and
+/// an already-canonical `youtube.com/embed/...`), rejecting anything else
+/// outright rather than silently storing an unplayable link. Deliberately
+/// not a full URL parser — just enough to cover what a "share" or "copy
+/// link" button on youtube.com actually produces.
+#[cfg(feature = "ssr")]
+fn extract_youtube_video_id(input: &str) -> Option<&str> {
+    let without_scheme = input
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| input.trim().strip_prefix("http://"))?;
+    let without_host_prefix = without_scheme
+        .strip_prefix("www.")
+        .or_else(|| without_scheme.strip_prefix("m."))
+        .unwrap_or(without_scheme);
+
+    let id = if let Some(rest) = without_host_prefix.strip_prefix("youtu.be/") {
+        rest.split(['?', '&', '#']).next()?
+    } else if let Some(rest) = without_host_prefix.strip_prefix("youtube.com/embed/") {
+        rest.split(['?', '&', '#']).next()?
+    } else {
+        let rest = without_host_prefix.strip_prefix("youtube.com/watch")?;
+        rest.strip_prefix('?')?
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("v="))?
+            .split(['&', '#'])
+            .next()?
+    };
+
+    // Real YouTube video IDs are always exactly 11 URL-safe characters.
+    let is_plausible_id = id.len() == 11
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    is_plausible_id.then_some(id)
+}
+
+/// Normalizes whatever YouTube share link a user pasted into the one
+/// canonical embed-URL form the review/edit UI actually renders
+/// (`<iframe src=...>`), or an error message if it isn't recognizably a
+/// YouTube link at all.
+#[cfg(feature = "ssr")]
+fn youtube_embed_url(input: &str) -> Result<String, String> {
+    extract_youtube_video_id(input)
+        .map(|id| format!("https://www.youtube.com/embed/{id}"))
+        .ok_or_else(|| "that doesn't look like a YouTube video link".to_string())
+}
+
 #[cfg(feature = "ssr")]
 struct CardFormFields {
     target_text: String,
@@ -187,14 +236,19 @@ struct CardFormFields {
     image_url: Option<String>,
     audio_url: Option<String>,
     video_url: Option<String>,
+    // `Some` only once validated by `youtube_embed_url` — an invalid
+    // pasted link fails the whole submission (see parse_card_multipart)
+    // rather than being silently dropped or stored unplayable.
+    youtube_url: Option<String>,
     // Only meaningful on the edit form, which is the only one that ever
     // renders these checkboxes (there's nothing to remove from a brand
-    // new card) — a new upload for the same field always wins over a
+    // new card) — a new upload/link for the same field always wins over a
     // remove request, since submitting both at once only makes sense as
     // "replace", not "replace, then immediately delete what I just set".
     remove_image: bool,
     remove_audio: bool,
     remove_video: bool,
+    remove_youtube: bool,
 }
 
 /// Pulls every field out of a card create/edit form submission: text
@@ -213,9 +267,11 @@ async fn parse_card_multipart(
         image_url: None,
         audio_url: None,
         video_url: None,
+        youtube_url: None,
         remove_image: false,
         remove_audio: false,
         remove_video: false,
+        remove_youtube: false,
     };
 
     while let Some(field) = multipart
@@ -233,9 +289,20 @@ async fn parse_card_multipart(
             "remove_image" => fields.remove_image = true,
             "remove_audio" => fields.remove_audio = true,
             "remove_video" => fields.remove_video = true,
+            "remove_youtube" => fields.remove_youtube = true,
             "image" => fields.image_url = upload_media_field(state, field, "image").await?,
             "audio" => fields.audio_url = upload_media_field(state, field, "audio").await?,
             "video" => fields.video_url = upload_media_field(state, field, "video").await?,
+            "youtube_url" => {
+                let raw = field.text().await.unwrap_or_default();
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    fields.youtube_url = Some(
+                        youtube_embed_url(trimmed)
+                            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -277,6 +344,7 @@ async fn cards_new(
             image_url: fields.image_url.as_deref().unwrap_or(""),
             audio_url: fields.audio_url.as_deref().unwrap_or(""),
             video_url: fields.video_url.as_deref().unwrap_or(""),
+            youtube_url: fields.youtube_url.as_deref().unwrap_or(""),
             target_text: &fields.target_text,
             two_way: fields.two_way,
         },
@@ -335,6 +403,13 @@ async fn cards_update(
             existing.video_url.unwrap_or_default()
         }
     });
+    let youtube_url = fields.youtube_url.unwrap_or_else(|| {
+        if fields.remove_youtube {
+            String::new()
+        } else {
+            existing.youtube_url.unwrap_or_default()
+        }
+    });
 
     web::db::update_card(
         &state.db_pool,
@@ -343,6 +418,7 @@ async fn cards_update(
             image_url: &image_url,
             audio_url: &audio_url,
             video_url: &video_url,
+            youtube_url: &youtube_url,
             target_text: &fields.target_text,
             two_way: fields.two_way,
         },
@@ -441,3 +517,63 @@ async fn main() {
 
 #[cfg(not(feature = "ssr"))]
 fn main() {}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::youtube_embed_url;
+
+    #[test]
+    fn accepts_a_watch_url() {
+        assert_eq!(
+            youtube_embed_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_a_watch_url_with_v_not_in_first_position() {
+        assert_eq!(
+            youtube_embed_url("https://youtube.com/watch?list=PLxyz&v=dQw4w9WgXcQ&t=30s").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_a_shortened_youtu_be_url() {
+        assert_eq!(
+            youtube_embed_url("https://youtu.be/dQw4w9WgXcQ?t=10").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_an_already_canonical_embed_url() {
+        assert_eq!(
+            youtube_embed_url("https://www.youtube.com/embed/dQw4w9WgXcQ").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_a_mobile_subdomain_url() {
+        assert_eq!(
+            youtube_embed_url("https://m.youtube.com/watch?v=dQw4w9WgXcQ").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_youtube_url() {
+        assert!(youtube_embed_url("https://vimeo.com/123456").is_err());
+    }
+
+    #[test]
+    fn rejects_a_watch_url_with_no_video_id() {
+        assert!(youtube_embed_url("https://www.youtube.com/watch?list=PLxyz").is_err());
+    }
+
+    #[test]
+    fn rejects_plain_text_that_is_not_a_url_at_all() {
+        assert!(youtube_embed_url("not a url").is_err());
+    }
+}
