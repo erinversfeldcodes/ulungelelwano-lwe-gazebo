@@ -107,19 +107,149 @@ fn random_key() -> String {
     out
 }
 
-/// Pulls `target_text`/`tags` fields and an optional `image` file out of a
-/// card create/edit form submission. Uploading is best-effort: with no
-/// storage configured (e.g. local dev without the S3_* env vars set), an
-/// attached image is silently skipped rather than failing the whole
-/// submission — the pasted-URL path still works either way.
+/// Uploads one `image`/`audio`/`video` multipart field to storage.
+/// Best-effort, same as before this was extracted: with no storage
+/// configured (e.g. local dev without the S3_* env vars set), an attached
+/// file is silently skipped rather than failing the whole submission —
+/// the pasted-URL path (image only) still works either way.
+#[cfg(feature = "ssr")]
+async fn upload_media_field(
+    state: &AppState,
+    field: axum::extract::multipart::Field<'_>,
+    kind: &str,
+) -> Result<Option<String>, (axum::http::StatusCode, String)> {
+    let content_type = field.content_type().map(str::to_string);
+    let data = field
+        .bytes()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+    if data.is_empty() {
+        return Ok(None);
+    }
+    match (&state.storage, content_type) {
+        (Some(storage), Some(content_type)) => {
+            let key = format!("cards/{}", random_key());
+            let url = storage
+                .upload(&key, &content_type, &data)
+                .await
+                .map_err(|e| {
+                    log::error!("card {kind} upload failed: {e}");
+                    (axum::http::StatusCode::BAD_GATEWAY, e)
+                })?;
+            Ok(Some(url))
+        }
+        (None, _) => {
+            log::warn!(
+                "card {kind} upload attached but no storage is configured — dropping it silently"
+            );
+            Ok(None)
+        }
+        (Some(_), None) => {
+            log::warn!("card {kind} upload attached with no content-type — dropping it");
+            Ok(None)
+        }
+    }
+}
+
+/// Extracts a `YouTube` video ID from any of the common share-link shapes
+/// users actually paste (`youtube.com/watch?v=...`, `youtu.be/...`, and
+/// an already-canonical `youtube.com/embed/...`), rejecting anything else
+/// outright rather than silently storing an unplayable link. Deliberately
+/// not a full URL parser — just enough to cover what a "share" or "copy
+/// link" button on youtube.com actually produces.
+#[cfg(feature = "ssr")]
+fn extract_youtube_video_id(input: &str) -> Option<&str> {
+    let without_scheme = input
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| input.trim().strip_prefix("http://"))?;
+    let without_host_prefix = without_scheme
+        .strip_prefix("www.")
+        .or_else(|| without_scheme.strip_prefix("m."))
+        .unwrap_or(without_scheme);
+
+    let id = if let Some(rest) = without_host_prefix.strip_prefix("youtu.be/") {
+        rest.split(['?', '&', '#']).next()?
+    } else if let Some(rest) = without_host_prefix.strip_prefix("youtube.com/embed/") {
+        rest.split(['?', '&', '#']).next()?
+    } else {
+        let rest = without_host_prefix.strip_prefix("youtube.com/watch")?;
+        rest.strip_prefix('?')?
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("v="))?
+            .split(['&', '#'])
+            .next()?
+    };
+
+    // Real YouTube video IDs are always exactly 11 URL-safe characters.
+    let is_plausible_id = id.len() == 11
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    is_plausible_id.then_some(id)
+}
+
+/// Normalizes whatever `YouTube` share link a user pasted into the one
+/// canonical embed-URL form the review/edit UI actually renders
+/// (`<iframe src=...>`), or an error message if it isn't recognizably a
+/// `YouTube` link at all.
+#[cfg(feature = "ssr")]
+fn youtube_embed_url(input: &str) -> Result<String, String> {
+    extract_youtube_video_id(input)
+        .map(|id| format!("https://www.youtube.com/embed/{id}"))
+        .ok_or_else(|| "that doesn't look like a YouTube video link".to_string())
+}
+
+// Every bool here is an independent, orthogonal form flag (a value and its
+// own "remove this" checkbox, per media field) rather than a set of states
+// that could collapse into an enum, so the usual fix for this lint doesn't
+// apply cleanly.
+#[cfg(feature = "ssr")]
+#[allow(clippy::struct_excessive_bools)]
+struct CardFormFields {
+    target_text: String,
+    tags_raw: String,
+    two_way: bool,
+    image_url: Option<String>,
+    audio_url: Option<String>,
+    video_url: Option<String>,
+    // `Some` only once validated by `youtube_embed_url` — an invalid
+    // pasted link fails the whole submission (see parse_card_multipart)
+    // rather than being silently dropped or stored unplayable.
+    youtube_url: Option<String>,
+    // Only meaningful on the edit form, which is the only one that ever
+    // renders these checkboxes (there's nothing to remove from a brand
+    // new card) — a new upload/link for the same field always wins over a
+    // remove request, since submitting both at once only makes sense as
+    // "replace", not "replace, then immediately delete what I just set".
+    remove_image: bool,
+    remove_audio: bool,
+    remove_video: bool,
+    remove_youtube: bool,
+}
+
+/// Pulls every field out of a card create/edit form submission: text
+/// fields, the `two_way` checkbox, whichever of image/audio/video were
+/// attached (each independent and optional — a card can have any
+/// combination, including none), and the edit form's "remove" checkboxes.
 #[cfg(feature = "ssr")]
 async fn parse_card_multipart(
     state: &AppState,
     multipart: &mut axum::extract::Multipart,
-) -> Result<(String, String, Option<String>), (axum::http::StatusCode, String)> {
-    let mut target_text = String::new();
-    let mut tags_raw = String::new();
-    let mut uploaded_url: Option<String> = None;
+) -> Result<CardFormFields, (axum::http::StatusCode, String)> {
+    let mut fields = CardFormFields {
+        target_text: String::new(),
+        tags_raw: String::new(),
+        two_way: false,
+        image_url: None,
+        audio_url: None,
+        video_url: None,
+        youtube_url: None,
+        remove_image: false,
+        remove_audio: false,
+        remove_video: false,
+        remove_youtube: false,
+    };
 
     while let Some(field) = multipart
         .next_field()
@@ -128,46 +258,33 @@ async fn parse_card_multipart(
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
-            "target_text" => target_text = field.text().await.unwrap_or_default(),
-            "tags" => tags_raw = field.text().await.unwrap_or_default(),
-            "image" => {
-                let content_type = field.content_type().map(str::to_string);
-                let data = field
-                    .bytes()
-                    .await
-                    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
-                if !data.is_empty() {
-                    match (&state.storage, content_type) {
-                        (Some(storage), Some(content_type)) => {
-                            let key = format!("cards/{}", random_key());
-                            let url =
-                                storage
-                                    .upload(&key, &content_type, &data)
-                                    .await
-                                    .map_err(|e| {
-                                        log::error!("card image upload failed: {e}");
-                                        (axum::http::StatusCode::BAD_GATEWAY, e)
-                                    })?;
-                            uploaded_url = Some(url);
-                        }
-                        (None, _) => {
-                            log::warn!(
-                                "card image upload attached but no storage is configured — dropping it silently"
-                            );
-                        }
-                        (Some(_), None) => {
-                            log::warn!(
-                                "card image upload attached with no content-type — dropping it"
-                            );
-                        }
-                    }
+            "target_text" => fields.target_text = field.text().await.unwrap_or_default(),
+            "tags" => fields.tags_raw = field.text().await.unwrap_or_default(),
+            // A checkbox only appears in the multipart body at all when
+            // checked, so this field's mere presence means true.
+            "two_way" => fields.two_way = true,
+            "remove_image" => fields.remove_image = true,
+            "remove_audio" => fields.remove_audio = true,
+            "remove_video" => fields.remove_video = true,
+            "remove_youtube" => fields.remove_youtube = true,
+            "image" => fields.image_url = upload_media_field(state, field, "image").await?,
+            "audio" => fields.audio_url = upload_media_field(state, field, "audio").await?,
+            "video" => fields.video_url = upload_media_field(state, field, "video").await?,
+            "youtube_url" => {
+                let raw = field.text().await.unwrap_or_default();
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    fields.youtube_url = Some(
+                        youtube_embed_url(trimmed)
+                            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?,
+                    );
                 }
             }
             _ => {}
         }
     }
 
-    Ok((target_text, tags_raw, uploaded_url))
+    Ok(fields)
 }
 
 #[cfg(feature = "ssr")]
@@ -195,14 +312,20 @@ async fn cards_new(
             "not signed in".to_string(),
         ))?;
 
-    let (target_text, tags_raw, image_url) = parse_card_multipart(&state, &mut multipart).await?;
+    let fields = parse_card_multipart(&state, &mut multipart).await?;
 
     web::db::create_card(
         &state.db_pool,
         user.id,
-        image_url.as_deref().unwrap_or(""),
-        &target_text,
-        &parse_tags(&tags_raw),
+        web::db::NewCard {
+            image_url: fields.image_url.as_deref().unwrap_or(""),
+            audio_url: fields.audio_url.as_deref().unwrap_or(""),
+            video_url: fields.video_url.as_deref().unwrap_or(""),
+            youtube_url: fields.youtube_url.as_deref().unwrap_or(""),
+            target_text: &fields.target_text,
+            two_way: fields.two_way,
+        },
+        &parse_tags(&fields.tags_raw),
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -232,22 +355,65 @@ async fn cards_update(
             "card not found".to_string(),
         ))?;
 
-    let (target_text, tags_raw, uploaded_url) =
-        parse_card_multipart(&state, &mut multipart).await?;
-    let image_url = uploaded_url.unwrap_or_else(|| existing.image_url.unwrap_or_default());
+    let fields = parse_card_multipart(&state, &mut multipart).await?;
+    // A new upload wins over a remove request (see CardFormFields); a
+    // remove request wins over keeping the existing value; otherwise the
+    // existing value is kept as-is.
+    let image_url = fields.image_url.unwrap_or_else(|| {
+        if fields.remove_image {
+            String::new()
+        } else {
+            existing.image_url.unwrap_or_default()
+        }
+    });
+    let audio_url = fields.audio_url.unwrap_or_else(|| {
+        if fields.remove_audio {
+            String::new()
+        } else {
+            existing.audio_url.unwrap_or_default()
+        }
+    });
+    let video_url = fields.video_url.unwrap_or_else(|| {
+        if fields.remove_video {
+            String::new()
+        } else {
+            existing.video_url.unwrap_or_default()
+        }
+    });
+    let youtube_url = fields.youtube_url.unwrap_or_else(|| {
+        if fields.remove_youtube {
+            String::new()
+        } else {
+            existing.youtube_url.unwrap_or_default()
+        }
+    });
 
     web::db::update_card(
         &state.db_pool,
         card_id,
-        &image_url,
-        &target_text,
-        &parse_tags(&tags_raw),
+        web::db::NewCard {
+            image_url: &image_url,
+            audio_url: &audio_url,
+            video_url: &video_url,
+            youtube_url: &youtube_url,
+            target_text: &fields.target_text,
+            two_way: fields.two_way,
+        },
+        &parse_tags(&fields.tags_raw),
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(axum::response::Redirect::to(&format!("/cards/{card_id}")))
 }
+
+/// Axum's default multipart body limit (2MB) comfortably fits an image
+/// but not a voice clip or a short video, so card uploads need a higher
+/// ceiling. Applied to the whole router rather than scoped to just the
+/// card routes — every other route's payloads are tiny text/JSON, so a
+/// generous shared ceiling costs nothing there.
+#[cfg(feature = "ssr")]
+const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 #[cfg(feature = "ssr")]
 async fn auth_logout(
@@ -316,6 +482,7 @@ async fn main() {
         .route("/cards/{id}", axum::routing::post(cards_update))
         .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell))
         .layer(tower_cookies::CookieManagerLayer::new())
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -326,3 +493,63 @@ async fn main() {
 
 #[cfg(not(feature = "ssr"))]
 fn main() {}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::youtube_embed_url;
+
+    #[test]
+    fn accepts_a_watch_url() {
+        assert_eq!(
+            youtube_embed_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_a_watch_url_with_v_not_in_first_position() {
+        assert_eq!(
+            youtube_embed_url("https://youtube.com/watch?list=PLxyz&v=dQw4w9WgXcQ&t=30s").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_a_shortened_youtu_be_url() {
+        assert_eq!(
+            youtube_embed_url("https://youtu.be/dQw4w9WgXcQ?t=10").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_an_already_canonical_embed_url() {
+        assert_eq!(
+            youtube_embed_url("https://www.youtube.com/embed/dQw4w9WgXcQ").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn accepts_a_mobile_subdomain_url() {
+        assert_eq!(
+            youtube_embed_url("https://m.youtube.com/watch?v=dQw4w9WgXcQ").unwrap(),
+            "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_youtube_url() {
+        assert!(youtube_embed_url("https://vimeo.com/123456").is_err());
+    }
+
+    #[test]
+    fn rejects_a_watch_url_with_no_video_id() {
+        assert!(youtube_embed_url("https://www.youtube.com/watch?list=PLxyz").is_err());
+    }
+
+    #[test]
+    fn rejects_plain_text_that_is_not_a_url_at_all() {
+        assert!(youtube_embed_url("not a url").is_err());
+    }
+}

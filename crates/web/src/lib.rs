@@ -9,6 +9,7 @@ pub mod cards;
 pub mod db;
 pub mod decks;
 pub mod email;
+pub mod media_recorder;
 pub mod state;
 pub mod storage;
 

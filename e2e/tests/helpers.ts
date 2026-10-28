@@ -73,6 +73,26 @@ export async function createCardInOwnDeck(
   return { word, deckName };
 }
 
+// Records a short clip via the given kind's RecordButton ("audio" or
+// "video"), using the fake media device Chromium is launched with (see
+// playwright.config.ts) — no real mic/camera involved, no human needed to
+// grant a permission prompt. Waits for the recorder to actually report
+// itself recording (confirms getUserMedia genuinely succeeded against the
+// fake device, not just that the click landed), accumulates at least one
+// second so MediaRecorder's periodic dataavailable actually fires at
+// least once, then stops and waits for the resulting preview player.
+// Assumes the given page already has exactly one audio RecordButton and
+// one video RecordButton, audio first — true of both the new-card and
+// edit-card forms today.
+export async function recordClip(page: Page, kind: "audio" | "video"): Promise<void> {
+  const recorder = page.locator(".recorder").nth(kind === "audio" ? 0 : 1);
+  await recorder.getByRole("button", { name: "Record", exact: true }).click();
+  await expect(recorder.getByRole("button", { name: "Stop recording" })).toBeVisible();
+  await page.waitForTimeout(1500);
+  await recorder.getByRole("button", { name: "Stop recording" }).click();
+  await expect(recorder.locator(kind)).toBeVisible();
+}
+
 // Reveals and grades "Good" the one card in a deck created by
 // createCardInOwnDeck, asserting it's actually that card.
 export async function reviewOwnCard(page: Page, deckName: string, word: string): Promise<void> {

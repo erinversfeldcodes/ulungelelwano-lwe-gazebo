@@ -62,13 +62,17 @@ jobs:
       - run: cargo nextest run --workspace --features web/ssr
 
   # Runs the real Playwright suite against a fully local, ephemeral instance
-  # of the app (own Postgres service, no Resend/Tigris configured — email
-  # falls back to Console mode and image upload is skipped, same graceful
-  # degradation local dev already relies on). Deliberately NOT run against
-  # production: cards/decks are a single shared, unscoped pool with no
-  # per-tenant isolation, so e2e-created fixtures would show up in the real
-  # four users' review queues. Preview apps (see preview.yml) separately get
-  # e2e run against the real deployed artifact, each on its own Neon branch.
+  # of the app (own Postgres service, no Resend configured — email falls
+  # back to Console mode, same graceful degradation local dev already
+  # relies on). Storage is real, though: Garage (the same image
+  # docker-compose.yml uses for local dev) started and bootstrapped here the
+  # same way `just storage-init` does locally, so image/audio/video upload
+  # e2e coverage exercises the actual upload path rather than the
+  # no-storage-configured no-op. Deliberately NOT run against production:
+  # cards/decks are a single shared, unscoped pool with no per-tenant
+  # isolation, so e2e-created fixtures would show up in the real four users'
+  # review queues. Preview apps (see preview.yml) separately get e2e run
+  # against the real deployed artifact, each on its own Neon branch.
   e2e:
     name: E2E (local)
     needs: check
@@ -91,6 +95,15 @@ jobs:
     env:
       DATABASE_URL: postgres://app:app@localhost:5432/app
       BASE_URL: http://127.0.0.1:3000
+      # Matches the fixed dev key/bucket `just storage-init` creates — see
+      # .env.example for what each of these means.
+      S3_BUCKET: gazebo-cards
+      S3_ENDPOINT: http://localhost:3900
+      S3_ACCESS_KEY: gazebo-local-dev-key
+      S3_SECRET_KEY: gazebo-local-dev-secret-access-key-0000000000000000
+      S3_PUBLIC_URL: http://gazebo-cards.web.garage.localhost:3902
+      S3_PATH_STYLE: "true"
+      S3_REGION: garage
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -100,7 +113,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: sqlx-cli,cargo-leptos
+          tool: sqlx-cli,cargo-leptos,just
+      # Only the garage service, not the whole compose stack — Postgres
+      # here is the `services:` container above (port 5432), not
+      # docker-compose.yml's (port 55432, for local dev only).
+      - name: Start Garage (S3-compatible storage)
+        run: docker compose up -d garage
+      - name: Bootstrap Garage bucket/key
+        run: just storage-init
       - run: sqlx migrate run --source migrations
       - run: cargo leptos build
       - name: Start the app in the background
