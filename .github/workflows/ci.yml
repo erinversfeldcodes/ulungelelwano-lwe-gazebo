@@ -49,6 +49,11 @@ jobs:
       # sqlx::test needs CREATEDB privilege to spin up a fresh database per
       # test; the default role from the postgres image already has it.
       DATABASE_URL: postgres://app:app@localhost:5432/app
+      # image_search::tests::real_providers_all_respond_to_a_search hits
+      # the real Pixabay API and fails loudly (not a skip) if the key is
+      # missing or the provider doesn't respond — see that test's own
+      # doc comment for why this is deliberate.
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -104,6 +109,10 @@ jobs:
       S3_PUBLIC_URL: http://gazebo-cards.web.garage.localhost:3902
       S3_PATH_STYLE: "true"
       S3_REGION: garage
+      # image-search.spec.ts's two real-provider tests need this to
+      # reach Pixabay for real — see that file's own comment on why
+      # they're not mocked.
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

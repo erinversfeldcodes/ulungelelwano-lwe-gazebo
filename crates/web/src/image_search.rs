@@ -35,18 +35,15 @@ fn new_http_client() -> reqwest::Client {
         .expect("building the image-search HTTP client should never fail")
 }
 
-/// Combined image search across Pexels, Pixabay, and Openverse. Pexels and
-/// Pixabay need their own API key (`PEXELS_API_KEY`/`PIXABAY_API_KEY`) and
-/// are simply skipped when unset — Openverse needs none, so a search
-/// always returns *something* with zero configuration, same spirit as
-/// `Storage`/`EmailSender` degrading gracefully rather than failing
-/// outright when a provider isn't set up.
+/// Combined image search across Pixabay and Openverse. Pixabay needs its
+/// own API key (`PIXABAY_API_KEY`) and is simply skipped when unset —
+/// Openverse needs none, so a search always returns *something* with zero
+/// configuration, same spirit as `Storage`/`EmailSender` degrading
+/// gracefully rather than failing outright when a provider isn't set up.
 #[derive(Clone)]
 pub struct ImageSearch {
     client: reqwest::Client,
-    pexels_key: Option<String>,
     pixabay_key: Option<String>,
-    pexels_base: String,
     pixabay_base: String,
     openverse_base: String,
 }
@@ -56,9 +53,7 @@ impl ImageSearch {
     pub fn from_env() -> Self {
         Self {
             client: new_http_client(),
-            pexels_key: non_empty_env("PEXELS_API_KEY"),
             pixabay_key: non_empty_env("PIXABAY_API_KEY"),
-            pexels_base: "https://api.pexels.com".to_string(),
             pixabay_base: "https://pixabay.com".to_string(),
             openverse_base: "https://api.openverse.org".to_string(),
         }
@@ -66,17 +61,13 @@ impl ImageSearch {
 
     #[cfg(test)]
     fn test_with(
-        pexels_base: String,
         pixabay_base: String,
         openverse_base: String,
-        pexels_key: Option<String>,
         pixabay_key: Option<String>,
     ) -> Self {
         Self {
             client: new_http_client(),
-            pexels_key,
             pixabay_key,
-            pexels_base,
             pixabay_base,
             openverse_base,
         }
@@ -84,76 +75,20 @@ impl ImageSearch {
 
     /// Queries every available provider concurrently and keeps going even
     /// if one provider's request fails outright — a Pixabay outage
-    /// shouldn't mean zero results when Pexels and Openverse are both
-    /// fine. Order is Pexels, then Pixabay, then Openverse; not
-    /// interleaved, simplicity over a fancier merge nobody asked for.
+    /// shouldn't mean zero results when Openverse is fine. Order is
+    /// Pixabay, then Openverse; not interleaved, simplicity over a fancier
+    /// merge nobody asked for.
     pub async fn search(&self, query: &str) -> Vec<ImageResult> {
-        let (pexels, pixabay, openverse) = tokio::join!(
-            self.search_pexels(query),
-            self.search_pixabay(query),
-            self.search_openverse(query),
-        );
+        let (pixabay, openverse) =
+            tokio::join!(self.search_pixabay(query), self.search_openverse(query));
         let mut results = Vec::new();
-        for (provider, outcome) in [
-            ("pexels", pexels),
-            ("pixabay", pixabay),
-            ("openverse", openverse),
-        ] {
+        for (provider, outcome) in [("pixabay", pixabay), ("openverse", openverse)] {
             match outcome {
                 Ok(mut found) => results.append(&mut found),
                 Err(e) => log::warn!("image search: {provider} request failed: {e}"),
             }
         }
         results
-    }
-
-    async fn search_pexels(&self, query: &str) -> Result<Vec<ImageResult>, String> {
-        #[derive(Deserialize)]
-        struct Response {
-            photos: Vec<Photo>,
-        }
-        #[derive(Deserialize)]
-        struct Photo {
-            id: u64,
-            src: Src,
-            alt: Option<String>,
-        }
-        #[derive(Deserialize)]
-        struct Src {
-            medium: String,
-        }
-
-        let Some(key) = &self.pexels_key else {
-            return Ok(Vec::new());
-        };
-
-        let response: Response = self
-            .client
-            .get(format!("{}/v1/search", self.pexels_base))
-            .header("Authorization", key)
-            .query(&[
-                ("query", query.to_string()),
-                ("per_page", MAX_RESULTS_PER_PROVIDER.to_string()),
-            ])
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        Ok(response
-            .photos
-            .into_iter()
-            .map(|p| ImageResult {
-                provider: "pexels".to_string(),
-                id: p.id.to_string(),
-                thumbnail_url: p.src.medium,
-                description: p.alt.unwrap_or_default(),
-            })
-            .collect())
     }
 
     async fn search_pixabay(&self, query: &str) -> Result<Vec<ImageResult>, String> {
@@ -255,7 +190,6 @@ impl ImageSearch {
     /// arbitrary host.
     pub async fn fetch_by_id(&self, provider: &str, id: &str) -> Result<(Vec<u8>, String), String> {
         let image_url = match provider {
-            "pexels" => self.pexels_full_url(id).await?,
             "pixabay" => self.pixabay_full_url(id).await?,
             "openverse" => self.openverse_full_url(id).await?,
             other => return Err(format!("unknown image provider: {other}")),
@@ -285,36 +219,6 @@ impl ImageSearch {
             ));
         }
         Ok((bytes.to_vec(), content_type))
-    }
-
-    async fn pexels_full_url(&self, id: &str) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct Photo {
-            src: Src,
-        }
-        #[derive(Deserialize)]
-        struct Src {
-            original: String,
-        }
-
-        let key = self
-            .pexels_key
-            .as_ref()
-            .ok_or_else(|| "Pexels isn't configured".to_string())?;
-
-        let photo: Photo = self
-            .client
-            .get(format!("{}/v1/photos/{id}", self.pexels_base))
-            .header("Authorization", key)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(photo.src.original)
     }
 
     async fn pixabay_full_url(&self, id: &str) -> Result<String, String> {
@@ -385,32 +289,19 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn image_search_with(
-        pexels: &MockServer,
         pixabay: &MockServer,
         openverse: &MockServer,
-        pexels_key: Option<&str>,
         pixabay_key: Option<&str>,
     ) -> ImageSearch {
         ImageSearch::test_with(
-            pexels.uri(),
             pixabay.uri(),
             openverse.uri(),
-            pexels_key.map(str::to_string),
             pixabay_key.map(str::to_string),
         )
     }
 
     #[tokio::test]
     async fn search_merges_results_from_every_configured_provider() {
-        let pexels = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "photos": [{"id": 1, "src": {"medium": "https://pexels.example/1.jpg"}, "alt": "a dog"}]
-            })))
-            .mount(&pexels)
-            .await;
-
         let pixabay = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/"))
@@ -430,26 +321,18 @@ mod tests {
             .mount(&openverse)
             .await;
 
-        let search = image_search_with(
-            &pexels,
-            &pixabay,
-            &openverse,
-            Some("pexels-key"),
-            Some("pixabay-key"),
-        );
+        let search = image_search_with(&pixabay, &openverse, Some("pixabay-key"));
         let results = search.search("dog").await;
 
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0].provider, "pexels");
-        assert_eq!(results[1].provider, "pixabay");
-        assert_eq!(results[2].provider, "openverse");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].provider, "pixabay");
+        assert_eq!(results[1].provider, "openverse");
     }
 
     #[tokio::test]
     async fn search_skips_a_provider_with_no_key_configured() {
-        let pexels = MockServer::start().await;
-        // No mock registered — if ImageSearch called Pexels without a
-        // key, wiremock would reject the unexpected request.
+        // No mock registered for Pixabay — if ImageSearch called it without
+        // a key, wiremock would reject the unexpected request.
         let pixabay = MockServer::start().await;
         let openverse = MockServer::start().await;
         Mock::given(method("GET"))
@@ -460,7 +343,7 @@ mod tests {
             .mount(&openverse)
             .await;
 
-        let search = image_search_with(&pexels, &pixabay, &openverse, None, None);
+        let search = image_search_with(&pixabay, &openverse, None);
         let results = search.search("dog").await;
 
         assert_eq!(results.len(), 1);
@@ -469,53 +352,39 @@ mod tests {
 
     #[tokio::test]
     async fn search_keeps_other_providers_results_when_one_fails() {
-        let pexels = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/search"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&pexels)
-            .await;
-
         let pixabay = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "hits": [{"id": 2, "previewURL": "https://pixabay.example/2.jpg", "tags": "dog"}]
-            })))
+            .respond_with(ResponseTemplate::new(500))
             .mount(&pixabay)
             .await;
 
         let openverse = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/images/"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"results": []})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "abc-123", "thumbnail": "https://openverse.example/3.jpg", "title": "Dog"}]
+            })))
             .mount(&openverse)
             .await;
 
-        let search = image_search_with(
-            &pexels,
-            &pixabay,
-            &openverse,
-            Some("pexels-key"),
-            Some("pixabay-key"),
-        );
+        let search = image_search_with(&pixabay, &openverse, Some("pixabay-key"));
         let results = search.search("dog").await;
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].provider, "pixabay");
+        assert_eq!(results[0].provider, "openverse");
     }
 
     #[tokio::test]
     async fn fetch_by_id_rejects_a_non_image_response() {
-        let pexels = MockServer::start().await;
+        let pixabay = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v1/photos/42"))
+            .and(path("/api/"))
+            .and(query_param("id", "42"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "src": {"original": format!("{}/not-an-image", pexels.uri())}
+                "hits": [{"largeImageURL": format!("{}/not-an-image", pixabay.uri())}]
             })))
-            .mount(&pexels)
+            .mount(&pixabay)
             .await;
         Mock::given(method("GET"))
             .and(path("/not-an-image"))
@@ -524,26 +393,26 @@ mod tests {
                     .set_body_string("<html></html>")
                     .insert_header("content-type", "text/html"),
             )
-            .mount(&pexels)
+            .mount(&pixabay)
             .await;
 
-        let pixabay = MockServer::start().await;
         let openverse = MockServer::start().await;
-        let search = image_search_with(&pexels, &pixabay, &openverse, Some("pexels-key"), None);
+        let search = image_search_with(&pixabay, &openverse, Some("pixabay-key"));
 
-        let result = search.fetch_by_id("pexels", "42").await;
+        let result = search.fetch_by_id("pixabay", "42").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn fetch_by_id_rejects_an_oversized_image() {
-        let pexels = MockServer::start().await;
+        let pixabay = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v1/photos/42"))
+            .and(path("/api/"))
+            .and(query_param("id", "42"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "src": {"original": format!("{}/huge.jpg", pexels.uri())}
+                "hits": [{"largeImageURL": format!("{}/huge.jpg", pixabay.uri())}]
             })))
-            .mount(&pexels)
+            .mount(&pixabay)
             .await;
         let oversized = vec![0u8; MAX_IMAGE_BYTES + 1];
         Mock::given(method("GET"))
@@ -553,26 +422,26 @@ mod tests {
                     .set_body_bytes(oversized)
                     .insert_header("content-type", "image/jpeg"),
             )
-            .mount(&pexels)
+            .mount(&pixabay)
             .await;
 
-        let pixabay = MockServer::start().await;
         let openverse = MockServer::start().await;
-        let search = image_search_with(&pexels, &pixabay, &openverse, Some("pexels-key"), None);
+        let search = image_search_with(&pixabay, &openverse, Some("pixabay-key"));
 
-        let result = search.fetch_by_id("pexels", "42").await;
+        let result = search.fetch_by_id("pixabay", "42").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn fetch_by_id_returns_bytes_and_content_type_on_success() {
-        let pexels = MockServer::start().await;
+        let pixabay = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v1/photos/42"))
+            .and(path("/api/"))
+            .and(query_param("id", "42"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "src": {"original": format!("{}/real.jpg", pexels.uri())}
+                "hits": [{"largeImageURL": format!("{}/real.jpg", pixabay.uri())}]
             })))
-            .mount(&pexels)
+            .mount(&pixabay)
             .await;
         Mock::given(method("GET"))
             .and(path("/real.jpg"))
@@ -581,15 +450,45 @@ mod tests {
                     .set_body_bytes(b"fake-jpeg-bytes".to_vec())
                     .insert_header("content-type", "image/jpeg"),
             )
-            .mount(&pexels)
+            .mount(&pixabay)
             .await;
 
-        let pixabay = MockServer::start().await;
         let openverse = MockServer::start().await;
-        let search = image_search_with(&pexels, &pixabay, &openverse, Some("pexels-key"), None);
+        let search = image_search_with(&pixabay, &openverse, Some("pixabay-key"));
 
-        let (bytes, content_type) = search.fetch_by_id("pexels", "42").await.unwrap();
+        let (bytes, content_type) = search.fetch_by_id("pixabay", "42").await.unwrap();
         assert_eq!(bytes, b"fake-jpeg-bytes");
         assert_eq!(content_type, "image/jpeg");
+    }
+
+    // Deliberately NOT gated behind a "skip if unconfigured" check the way
+    // storage.rs's upload_round_trips_against_configured_storage is. All
+    // the other tests in this file prove the parsing/merge/degradation
+    // logic is correct against responses shaped like the real ones; this
+    // one is the only thing that actually proves the real Pixabay and
+    // Openverse APIs are still reachable and still shaped the way this
+    // code assumes. A provider that's down, rate-limited, or has changed
+    // its response shape should fail this test and block a merge, not be
+    // silently skipped — so a missing API key fails loudly too, rather
+    // than letting the test pass by doing nothing. CI must have
+    // PIXABAY_API_KEY configured as a real secret for this to mean
+    // anything; Openverse needs no key, so it's always exercised for real
+    // regardless.
+    #[tokio::test]
+    async fn real_providers_all_respond_to_a_search() {
+        assert!(
+            non_empty_env("PIXABAY_API_KEY").is_some(),
+            "PIXABAY_API_KEY must be set for this test to actually verify Pixabay connectivity"
+        );
+
+        let results = ImageSearch::from_env().search("dog").await;
+
+        for provider in ["pixabay", "openverse"] {
+            assert!(
+                results.iter().any(|r| r.provider == provider),
+                "expected at least one real result from {provider}, got none — \
+                 check API key validity, provider status, and rate limits"
+            );
+        }
     }
 }

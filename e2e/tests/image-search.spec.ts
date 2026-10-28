@@ -1,10 +1,10 @@
 import { test, expect } from "./fixtures";
 import { uniqueWord } from "./helpers";
 
-// This file deliberately never asserts on real Pexels/Pixabay/Openverse
-// search *content* — only Openverse needs no key, so it's the only
-// provider this suite could realistically hit even in CI, and asserting
-// on a third party's live catalog would make these tests flaky against
+// This file deliberately never asserts on real Pixabay/Openverse search
+// *content* — only Openverse needs no key, so it's the only provider
+// this suite could realistically hit even in CI, and asserting on a
+// third party's live catalog would make these tests flaky against
 // something nobody here controls. What's actually load-bearing to test
 // locally: the English field structurally can't be submitted as part of
 // the card (see app.rs's ImageSearchPicker — it has no `name` attribute
@@ -50,4 +50,65 @@ test("a card saved without using image search carries no trace of the English te
 
   await expect(page.getByText(word, { exact: true })).toBeVisible();
   await expect(page.getByText(marker, { exact: true })).not.toBeVisible();
+});
+
+// Unlike every test above, these two deliberately DO depend on reaching
+// the real Pixabay/Openverse APIs (PIXABAY_API_KEY must be set wherever
+// this runs) and on real storage being configured (so import_card_image
+// can actually complete) — on purpose. A provider that's down,
+// rate-limited, or has changed its response shape, or a picked image that
+// silently fails to persist, should fail these tests and block a merge,
+// not be worked around with a mock. See image_search.rs's
+// real_providers_all_respond_to_a_search for the equivalent check at the
+// Rust level (search only, no browser/storage needed there).
+
+test("search returns real results from both providers", async ({ page }) => {
+  await page.goto("/new");
+  await page
+    .getByLabel("English translation (used only to search for an image — never stored on the card)")
+    .fill("dog");
+  await page.getByRole("button", { name: "Search images" }).click();
+  await expect(page.getByText("Searching…")).not.toBeVisible({ timeout: 20_000 });
+
+  for (const provider of ["pixabay", "openverse"]) {
+    await expect(
+      page.locator(`img.image-search-thumb[data-provider="${provider}"]`).first(),
+    ).toBeVisible();
+  }
+});
+
+test("picking a real search result renders on the card and survives a reload", async ({
+  page,
+}) => {
+  const word = uniqueWord("image-search-real");
+
+  await page.goto("/new");
+  await page.getByLabel("Target-language word/phrase").fill(word);
+  await page
+    .getByLabel("English translation (used only to search for an image — never stored on the card)")
+    .fill("dog");
+  await page.getByRole("button", { name: "Search images" }).click();
+  await expect(page.getByText("Searching…")).not.toBeVisible({ timeout: 20_000 });
+
+  // Openverse specifically: no API key needed to search it, so a picked
+  // Openverse result isolates whether import_card_image itself (the
+  // fetch-by-id + re-upload to our own storage) works, separately from
+  // whether the Pixabay credential is valid.
+  const thumb = page.locator('img.image-search-thumb[data-provider="openverse"]').first();
+  await expect(thumb).toBeVisible();
+  await thumb.click();
+  await expect(page.locator(".image-search-chosen img")).toBeVisible({ timeout: 20_000 });
+
+  await page.getByRole("button", { name: "Add" }).click();
+  await expect(page).toHaveURL("/");
+
+  const cardImage = page.locator("li", { hasText: word }).locator("img");
+  await expect(cardImage).toBeVisible();
+  const storedSrc = await cardImage.getAttribute("src");
+  // The card's image must be our own re-hosted copy, never a link
+  // straight back to the provider — see import_card_image's doc comment.
+  expect(storedSrc).not.toContain("openverse");
+
+  await page.reload();
+  await expect(page.locator("li", { hasText: word }).locator("img")).toBeVisible();
 });

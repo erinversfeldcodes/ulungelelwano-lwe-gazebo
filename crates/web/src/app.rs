@@ -115,6 +115,7 @@ fn ImageSearchPicker(
                                     src=r.thumbnail_url
                                     alt=r.description
                                     class="image-search-thumb"
+                                    data-provider=r.provider.clone()
                                     on:click=move |_| {
                                         import.dispatch(ImportCardImage {
                                             provider: provider.clone(),
