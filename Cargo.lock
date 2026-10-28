@@ -4286,6 +4286,7 @@ dependencies = [
  "domain",
  "env_logger",
  "insta",
+ "js-sys",
  "leptos",
  "leptos_axum",
  "leptos_meta",
@@ -4303,6 +4304,8 @@ dependencies = [
  "tower-http 0.7.1",
  "uuid",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wiremock",
 ]
 

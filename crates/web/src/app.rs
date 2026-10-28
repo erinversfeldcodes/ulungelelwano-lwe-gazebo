@@ -4,11 +4,14 @@
 
 use crate::account::{RequestMagicLink, SetDailyNewCardLimit, current_user_name, user_stats};
 use crate::cards::{
-    DeleteCard, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags, review_queue,
+    DeleteCard, DirectionInput, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags,
+    review_queue,
 };
 use crate::decks::{
     AddCardToDeck, CreateDeck, DeleteDeck, RemoveCardFromDeck, RenameDeck, list_decks,
 };
+use crate::media_recorder::RecordButton;
+use leptos::html;
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::{
@@ -18,6 +21,16 @@ use leptos_router::{
     path,
 };
 use uuid::Uuid;
+
+/// `card.youtube_url` is always already a normalized
+/// `youtube.com/embed/{id}` URL by the time it reaches here (validated
+/// and canonicalized server-side in main.rs, never the raw link a user
+/// pasted), so this is just the embed markup — no parsing needed. Shared
+/// across the card list, card detail, and review pages rather than
+/// repeated, since it's the exact same three attributes everywhere.
+fn youtube_embed(url: String) -> impl IntoView {
+    view! { <iframe src=url width="560" height="315" allowfullscreen=true></iframe> }
+}
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
@@ -168,6 +181,13 @@ fn CardListPage() -> impl IntoView {
                                             {card
                                                 .image_url
                                                 .map(|url| view! { <img src=url alt="" /> })}
+                                            {card
+                                                .audio_url
+                                                .map(|url| view! { <audio controls src=url></audio> })}
+                                            {card
+                                                .video_url
+                                                .map(|url| view! { <video controls src=url></video> })}
+                                            {card.youtube_url.map(youtube_embed)}
                                             <span>{card.target_text}</span>
                                             " "
                                             <A href=edit_href>"Edit"</A>
@@ -188,6 +208,8 @@ fn CardListPage() -> impl IntoView {
 #[component]
 fn NewCardPage() -> impl IntoView {
     let auth = Resource::new(|| (), |()| current_user_name());
+    let audio_input: NodeRef<html::Input> = NodeRef::new();
+    let video_input: NodeRef<html::Input> = NodeRef::new();
 
     view! {
         <h1>"Add a card"</h1>
@@ -199,8 +221,30 @@ fn NewCardPage() -> impl IntoView {
                 view! {
                     <form method="post" action="/cards/new" enctype="multipart/form-data">
                         <label>"Image file" <input type="file" name="image" accept="image/*" /></label>
+                        <label>
+                            "Audio file"
+                            <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
+                        </label>
+                        <RecordButton kind="audio" target_input=audio_input />
+                        <label>
+                            "Video file"
+                            <input type="file" name="video" accept="video/*" node_ref=video_input />
+                        </label>
+                        <RecordButton kind="video" target_input=video_input />
+                        <label>
+                            "Or link a YouTube video"
+                            <input
+                                type="url"
+                                name="youtube_url"
+                                placeholder="https://www.youtube.com/watch?v=..."
+                            />
+                        </label>
                         <label>"Target-language word/phrase" <input type="text" name="target_text" /></label>
                         <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
+                        <label>
+                            <input type="checkbox" name="two_way" />
+                            "Two-way: also review back → front, scheduled independently"
+                        </label>
                         <button type="submit">"Add"</button>
                     </form>
                 }
@@ -232,6 +276,8 @@ fn EditCardPage() -> impl IntoView {
     let delete = ServerAction::<DeleteCard>::new();
     let toggle_deck = ServerAction::<AddCardToDeck>::new();
     let untoggle_deck = ServerAction::<RemoveCardFromDeck>::new();
+    let audio_input: NodeRef<html::Input> = NodeRef::new();
+    let video_input: NodeRef<html::Input> = NodeRef::new();
 
     let navigate = use_navigate();
     Effect::new(move |_| {
@@ -257,6 +303,15 @@ fn EditCardPage() -> impl IntoView {
                             .image_url
                             .clone()
                             .map(|url| view! { <img src=url alt="" /> });
+                        let audio_view = detail
+                            .audio_url
+                            .clone()
+                            .map(|url| view! { <audio controls src=url></audio> });
+                        let video_view = detail
+                            .video_url
+                            .clone()
+                            .map(|url| view! { <video controls src=url></video> });
+                        let youtube_view = detail.youtube_url.clone().map(youtube_embed);
                         let deck_ids = detail.deck_ids.clone();
 
                         // Anyone can view a card; only a signed-in user sees
@@ -273,17 +328,71 @@ fn EditCardPage() -> impl IntoView {
                         });
                         let edit_form = signed_in.then(|| {
                             let tags_value = detail.tags.join(", ");
+                            // Only offered when there's actually something
+                            // to remove — a brand-new card (NewCardPage)
+                            // has no "remove" checkboxes at all, since
+                            // nothing's attached yet to remove.
+                            let remove_image = detail.image_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_image" />
+                                    "Remove image"
+                                </label>
+                            });
+                            let remove_audio = detail.audio_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_audio" />
+                                    "Remove audio"
+                                </label>
+                            });
+                            let remove_video = detail.video_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_video" />
+                                    "Remove video"
+                                </label>
+                            });
+                            let remove_youtube = detail.youtube_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_youtube" />
+                                    "Remove YouTube link"
+                                </label>
+                            });
                             view! {
                                 <form method="post" action=action enctype="multipart/form-data">
                                     <label>
                                         "Replace image (optional)"
                                         <input type="file" name="image" accept="image/*" />
                                     </label>
+                                    {remove_image}
+                                    <label>
+                                        "Replace audio (optional)"
+                                        <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
+                                    </label>
+                                    <RecordButton kind="audio" target_input=audio_input />
+                                    {remove_audio}
+                                    <label>
+                                        "Replace video (optional)"
+                                        <input type="file" name="video" accept="video/*" node_ref=video_input />
+                                    </label>
+                                    <RecordButton kind="video" target_input=video_input />
+                                    {remove_video}
+                                    <label>
+                                        "Replace YouTube link (optional)"
+                                        <input
+                                            type="url"
+                                            name="youtube_url"
+                                            placeholder="https://www.youtube.com/watch?v=..."
+                                        />
+                                    </label>
+                                    {remove_youtube}
                                     <label>
                                         "Target-language word/phrase"
                                         <input type="text" name="target_text" value=detail.target_text.clone() />
                                     </label>
                                     <label>"Tags (comma separated)" <input type="text" name="tags" value=tags_value /></label>
+                                    <label>
+                                        <input type="checkbox" name="two_way" checked=detail.two_way />
+                                        "Two-way: also review back → front, scheduled independently"
+                                    </label>
                                     <button type="submit">"Save"</button>
                                 </form>
                             }
@@ -355,6 +464,9 @@ fn EditCardPage() -> impl IntoView {
                         view! {
                             <div class="review-card">
                                 {image_view}
+                                {audio_view}
+                                {video_view}
+                                {youtube_view}
                                 {read_only_info}
                             </div>
                             {edit_form}
@@ -512,28 +624,53 @@ fn ReviewPage() -> impl IntoView {
                             None => view! { {counts} <p>"Nothing due. Nice."</p> }.into_any(),
                             Some(card) => {
                                 let card_id = card.id;
-                                view! {
-                                    {counts}
-                                    <div class="review-card">
-                                        {card
-                                            .image_url
-                                            .map(|url| view! { <img src=url alt="" /> })}
+                                let direction = card.direction;
+                                let media_view = view! {
+                                    {card.image_url.map(|url| view! { <img src=url alt="" /> })}
+                                    {card.audio_url.map(|url| view! { <audio controls src=url></audio> })}
+                                    {card.video_url.map(|url| view! { <video controls src=url></video> })}
+                                    {card.youtube_url.map(youtube_embed)}
+                                }
+                                .into_any();
+                                // Forward: media is the prompt, target_text the
+                                // answer. Reverse (two-way cards only): the same
+                                // card, but target_text is the prompt and media
+                                // is the answer — this slot is independently
+                                // scheduled from the forward one.
+                                let prompt_and_answer = match direction {
+                                    DirectionInput::Forward => view! {
+                                        {media_view}
                                         <details>
                                             <summary>"Reveal"</summary>
                                             <p>{card.target_text}</p>
                                         </details>
+                                    }
+                                    .into_any(),
+                                    DirectionInput::Reverse => view! {
+                                        <p>{card.target_text}</p>
+                                        <details>
+                                            <summary>"Reveal"</summary>
+                                            {media_view}
+                                        </details>
+                                    }
+                                    .into_any(),
+                                };
+                                view! {
+                                    {counts}
+                                    <div class="review-card">
+                                        {prompt_and_answer}
                                         <div class="review-grades">
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Again });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Again, direction });
                                             }>"Again"</button>
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Hard });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Hard, direction });
                                             }>"Hard"</button>
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Good });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Good, direction });
                                             }>"Good"</button>
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Easy });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Easy, direction });
                                             }>"Easy"</button>
                                         </div>
                                     </div>

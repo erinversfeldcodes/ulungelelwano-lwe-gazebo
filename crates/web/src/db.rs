@@ -12,7 +12,17 @@ use uuid::Uuid;
 pub struct CardRow {
     pub id: Uuid,
     pub image_url: Option<String>,
+    pub audio_url: Option<String>,
+    pub video_url: Option<String>,
+    /// A `YouTube` embed URL (`https://www.youtube.com/embed/{id}`),
+    /// already normalized at write time — never a raw `watch?v=`/`youtu.be`
+    /// link, so rendering it is just `<iframe src=...>` with no further
+    /// parsing needed. Independent of `video_url`: a card links a `YouTube`
+    /// video instead of an uploaded/recorded one, not alongside it, though
+    /// nothing stops both being set if a caller really wants that.
+    pub youtube_url: Option<String>,
     pub target_text: String,
+    pub two_way: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -28,9 +38,76 @@ pub enum ReviewOrder {
     HardestFirst,
 }
 
+/// Which side of a card is shown first. A two-way card is reviewed in
+/// both directions — each scheduled and graded independently (Anki's
+/// "Basic and reversed" behavior) — so this isn't a card property, it's
+/// a property of one specific review-queue slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Media (image/audio/video) shown first, `target_text` is the answer.
+    Forward,
+    /// `target_text` shown first, media is the answer.
+    Reverse,
+}
+
+impl Direction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Direction::Forward => "forward",
+            Direction::Reverse => "reverse",
+        }
+    }
+
+    fn from_db(s: &str) -> Self {
+        match s {
+            "reverse" => Direction::Reverse,
+            _ => Direction::Forward,
+        }
+    }
+}
+
+/// A card as it appears in one specific review-queue slot: besides the
+/// card's own content, carries which direction this slot is — the same
+/// two-way card can appear as two independent slots, one per direction.
+#[derive(Debug, Clone)]
+pub struct ReviewQueueCard {
+    pub id: Uuid,
+    pub image_url: Option<String>,
+    pub audio_url: Option<String>,
+    pub video_url: Option<String>,
+    pub youtube_url: Option<String>,
+    pub target_text: String,
+    pub direction: Direction,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct ReviewQueueCardRow {
+    id: Uuid,
+    image_url: Option<String>,
+    audio_url: Option<String>,
+    video_url: Option<String>,
+    youtube_url: Option<String>,
+    target_text: String,
+    direction: String,
+}
+
+impl From<ReviewQueueCardRow> for ReviewQueueCard {
+    fn from(row: ReviewQueueCardRow) -> Self {
+        ReviewQueueCard {
+            id: row.id,
+            image_url: row.image_url,
+            audio_url: row.audio_url,
+            video_url: row.video_url,
+            youtube_url: row.youtube_url,
+            target_text: row.target_text,
+            direction: Direction::from_db(&row.direction),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ReviewQueue {
-    pub cards: Vec<CardRow>,
+    pub cards: Vec<ReviewQueueCard>,
     pub due_review_count: i64,
     pub new_available_today: i64,
 }
@@ -52,6 +129,31 @@ pub struct UserStats {
     pub hardest_cards: Vec<HardCardRow>,
 }
 
+/// Fields that make up a card's own content, as opposed to its tags or
+/// deck memberships. A plain struct rather than more positional
+/// arguments: `create_card`/`update_card` would otherwise take two bools
+/// and three optional-URL strings in a row, which is exactly the kind of
+/// signature that's easy to miscall without the compiler catching it.
+/// `Default` means a test that only cares about `target_text` can write
+/// `NewCard { target_text: "word", ..Default::default() }` instead of
+/// spelling out every unused field.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NewCard<'a> {
+    pub image_url: &'a str,
+    pub audio_url: &'a str,
+    pub video_url: &'a str,
+    /// Must already be a normalized `https://www.youtube.com/embed/{id}`
+    /// URL — callers are responsible for parsing/validating whatever the
+    /// user actually pasted before this point (see
+    /// `main.rs::youtube_embed_url`).
+    pub youtube_url: &'a str,
+    pub target_text: &'a str,
+    pub two_way: bool,
+}
+
+const CARD_COLUMNS: &str =
+    "c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, c.two_way";
+
 // --- cards --------------------------------------------------------------
 
 pub async fn list_cards(
@@ -61,43 +163,45 @@ pub async fn list_cards(
 ) -> sqlx::Result<Vec<CardRow>> {
     match (tag, deck_id) {
         (None, None) => {
-            sqlx::query_as(
-                "SELECT c.id, c.image_url, c.target_text FROM cards c ORDER BY c.created_at DESC",
-            )
-            .fetch_all(pool)
-            .await
+            let sql = format!("SELECT {CARD_COLUMNS} FROM cards c ORDER BY c.created_at DESC");
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .fetch_all(pool)
+                .await
         }
         (Some(tag), None) => {
-            sqlx::query_as(
-                "SELECT c.id, c.image_url, c.target_text FROM cards c \
+            let sql = format!(
+                "SELECT {CARD_COLUMNS} FROM cards c \
                  JOIN card_tags t ON t.card_id = c.id AND t.tag = $1 \
-                 ORDER BY c.created_at DESC",
-            )
-            .bind(tag)
-            .fetch_all(pool)
-            .await
+                 ORDER BY c.created_at DESC"
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(tag)
+                .fetch_all(pool)
+                .await
         }
         (None, Some(deck_id)) => {
-            sqlx::query_as(
-                "SELECT c.id, c.image_url, c.target_text FROM cards c \
+            let sql = format!(
+                "SELECT {CARD_COLUMNS} FROM cards c \
                  JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $1 \
-                 ORDER BY c.created_at DESC",
-            )
-            .bind(deck_id)
-            .fetch_all(pool)
-            .await
+                 ORDER BY c.created_at DESC"
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(deck_id)
+                .fetch_all(pool)
+                .await
         }
         (Some(tag), Some(deck_id)) => {
-            sqlx::query_as(
-                "SELECT c.id, c.image_url, c.target_text FROM cards c \
+            let sql = format!(
+                "SELECT {CARD_COLUMNS} FROM cards c \
                  JOIN card_tags t ON t.card_id = c.id AND t.tag = $1 \
                  JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $2 \
-                 ORDER BY c.created_at DESC",
-            )
-            .bind(tag)
-            .bind(deck_id)
-            .fetch_all(pool)
-            .await
+                 ORDER BY c.created_at DESC"
+            );
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(tag)
+                .bind(deck_id)
+                .fetch_all(pool)
+                .await
         }
     }
 }
@@ -109,7 +213,8 @@ pub async fn list_tags(pool: &PgPool) -> sqlx::Result<Vec<String>> {
 }
 
 pub async fn get_card(pool: &PgPool, card_id: Uuid) -> sqlx::Result<Option<CardRow>> {
-    sqlx::query_as("SELECT id, image_url, target_text FROM cards WHERE id = $1")
+    let sql = format!("SELECT {CARD_COLUMNS} FROM cards c WHERE c.id = $1");
+    sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(card_id)
         .fetch_optional(pool)
         .await
@@ -143,21 +248,34 @@ async fn ensure_default_deck_in_tx(
         .await
 }
 
+/// `""` means "no media" at the API boundary (matching the pre-existing
+/// convention for `image_url` that `audio_url`/`video_url` now follow too), but
+/// must become SQL NULL on the way in — otherwise `Option<String>` reads
+/// back as `Some("")`, not `None`, and the view's `.map()` on it renders
+/// an empty, controls-only `<audio>`/`<video>` player for a card that was
+/// never given one.
+fn non_empty(s: &str) -> Option<&str> {
+    (!s.is_empty()).then_some(s)
+}
+
 pub async fn create_card(
     pool: &PgPool,
     created_by: Uuid,
-    image_url: &str,
-    target_text: &str,
+    card: NewCard<'_>,
     tags: &[String],
 ) -> sqlx::Result<Uuid> {
     let mut tx = pool.begin().await?;
 
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO cards (card_type, image_url, target_text, created_by) \
-         VALUES ('image_to_target', $1, $2, $3) RETURNING id",
+        "INSERT INTO cards (card_type, image_url, audio_url, video_url, youtube_url, target_text, two_way, created_by) \
+         VALUES ('image_to_target', $1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
-    .bind(image_url)
-    .bind(target_text)
+    .bind(non_empty(card.image_url))
+    .bind(non_empty(card.audio_url))
+    .bind(non_empty(card.video_url))
+    .bind(non_empty(card.youtube_url))
+    .bind(card.target_text)
+    .bind(card.two_way)
     .bind(created_by)
     .fetch_one(&mut *tx)
     .await?;
@@ -178,18 +296,24 @@ pub async fn create_card(
 pub async fn update_card(
     pool: &PgPool,
     card_id: Uuid,
-    image_url: &str,
-    target_text: &str,
+    card: NewCard<'_>,
     tags: &[String],
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
 
-    sqlx::query("UPDATE cards SET image_url = $1, target_text = $2 WHERE id = $3")
-        .bind(image_url)
-        .bind(target_text)
-        .bind(card_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE cards SET image_url = $1, audio_url = $2, video_url = $3, youtube_url = $4, \
+         target_text = $5, two_way = $6 WHERE id = $7",
+    )
+    .bind(non_empty(card.image_url))
+    .bind(non_empty(card.audio_url))
+    .bind(non_empty(card.video_url))
+    .bind(non_empty(card.youtube_url))
+    .bind(card.target_text)
+    .bind(card.two_way)
+    .bind(card_id)
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query("DELETE FROM card_tags WHERE card_id = $1")
         .bind(card_id)
@@ -304,13 +428,15 @@ pub async fn get_review_state(
     pool: &PgPool,
     user_id: Uuid,
     card_id: Uuid,
+    direction: Direction,
 ) -> sqlx::Result<ReviewState> {
     let row: Option<ReviewStateRow> = sqlx::query_as(
         "SELECT stability, difficulty, interval_days, repetitions, lapses FROM review_state \
-         WHERE user_id = $1 AND card_id = $2",
+         WHERE user_id = $1 AND card_id = $2 AND direction = $3",
     )
     .bind(user_id)
     .bind(card_id)
+    .bind(direction.as_str())
     .fetch_optional(pool)
     .await?;
 
@@ -326,14 +452,16 @@ pub async fn get_review_state(
     })
 }
 
-/// Schedules `card_id`'s next review for `user_id` and logs the grading
-/// event, atomically. Returns the resulting state (useful for tests and
-/// for any caller that wants to show the user what just happened).
+/// Schedules `card_id`'s next review (in `direction`) for `user_id` and
+/// logs the grading event, atomically. Returns the resulting state (useful
+/// for tests and for any caller that wants to show the user what just
+/// happened).
 pub async fn record_review(
     pool: &PgPool,
     user_id: Uuid,
     card_id: Uuid,
     grade: Grade,
+    direction: Direction,
 ) -> sqlx::Result<ReviewState> {
     // Fetched alongside last_reviewed_at (rather than via get_review_state)
     // because FSRS needs actual elapsed time since the last review, not
@@ -341,10 +469,11 @@ pub async fn record_review(
     // than one reviewed exactly on time.
     let row: Option<ReviewStateWithLastReviewedRow> = sqlx::query_as(
         "SELECT stability, difficulty, interval_days, repetitions, lapses, last_reviewed_at \
-             FROM review_state WHERE user_id = $1 AND card_id = $2",
+             FROM review_state WHERE user_id = $1 AND card_id = $2 AND direction = $3",
     )
     .bind(user_id)
     .bind(card_id)
+    .bind(direction.as_str())
     .fetch_optional(pool)
     .await?;
 
@@ -380,9 +509,9 @@ pub async fn record_review(
     // ON CONFLICT branch deliberately omits it, so it's never overwritten.
     sqlx::query(
         "INSERT INTO review_state \
-            (user_id, card_id, stability, difficulty, interval_days, repetitions, lapses, due_at, last_reviewed_at, introduced_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now()) \
-         ON CONFLICT (user_id, card_id) DO UPDATE SET \
+            (user_id, card_id, direction, stability, difficulty, interval_days, repetitions, lapses, due_at, last_reviewed_at, introduced_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now()) \
+         ON CONFLICT (user_id, card_id, direction) DO UPDATE SET \
             stability = EXCLUDED.stability, \
             difficulty = EXCLUDED.difficulty, \
             interval_days = EXCLUDED.interval_days, \
@@ -393,6 +522,7 @@ pub async fn record_review(
     )
     .bind(user_id)
     .bind(card_id)
+    .bind(direction.as_str())
     .bind(next.stability)
     .bind(next.difficulty)
     .bind(next.interval_days)
@@ -402,12 +532,15 @@ pub async fn record_review(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("INSERT INTO review_log (user_id, card_id, grade) VALUES ($1, $2, $3)")
-        .bind(user_id)
-        .bind(card_id)
-        .bind(grade_label(grade))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO review_log (user_id, card_id, direction, grade) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_id)
+    .bind(card_id)
+    .bind(direction.as_str())
+    .bind(grade_label(grade))
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
     Ok(next)
@@ -427,7 +560,7 @@ async fn due_review_cards(
     user_id: Uuid,
     deck_id: Option<Uuid>,
     order: ReviewOrder,
-) -> sqlx::Result<Vec<CardRow>> {
+) -> sqlx::Result<Vec<ReviewQueueCard>> {
     // `order_clause` is one of three fixed literals selected by a closed
     // Rust enum, never user input, so interpolating it isn't a SQL
     // injection risk the way interpolating a value would be.
@@ -439,9 +572,10 @@ async fn due_review_cards(
         ReviewOrder::HardestFirst => "rs.difficulty DESC",
     };
 
-    if let Some(deck_id) = deck_id {
+    let rows: Vec<ReviewQueueCardRow> = if let Some(deck_id) = deck_id {
         let sql = format!(
-            "SELECT c.id, c.image_url, c.target_text FROM cards c \
+            "SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, rs.direction \
+             FROM cards c \
              JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
              JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $2 \
              WHERE rs.due_at <= now() ORDER BY {order_clause}"
@@ -450,52 +584,81 @@ async fn due_review_cards(
             .bind(user_id)
             .bind(deck_id)
             .fetch_all(pool)
-            .await
+            .await?
     } else {
         let sql = format!(
-            "SELECT c.id, c.image_url, c.target_text FROM cards c \
+            "SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, rs.direction \
+             FROM cards c \
              JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
              WHERE rs.due_at <= now() ORDER BY {order_clause}"
         );
         sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(user_id)
             .fetch_all(pool)
-            .await
-    }
+            .await?
+    };
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
+/// Candidates never reviewed in a given direction: the existing
+/// `media→target_text` direction for every card, plus (for two-way cards
+/// only) the additional `target_text→media` direction. Each direction is
+/// independently "new" or not, so a two-way card can offer up to two new
+/// slots.
 async fn new_cards(
     pool: &PgPool,
     user_id: Uuid,
     deck_id: Option<Uuid>,
     limit: i64,
-) -> sqlx::Result<Vec<CardRow>> {
+) -> sqlx::Result<Vec<ReviewQueueCard>> {
     if limit <= 0 {
         return Ok(Vec::new());
     }
-    if let Some(deck_id) = deck_id {
+    let rows: Vec<ReviewQueueCardRow> = if let Some(deck_id) = deck_id {
         sqlx::query_as(
-            "SELECT c.id, c.image_url, c.target_text FROM cards c \
-             JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $3 \
-             LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
-             WHERE rs.card_id IS NULL ORDER BY c.created_at ASC LIMIT $2",
+            "SELECT id, image_url, audio_url, video_url, youtube_url, target_text, direction FROM ( \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
+                        'forward' AS direction, c.created_at AS sort_key \
+                 FROM cards c \
+                 JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $3 \
+                 LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 AND rs.direction = 'forward' \
+                 WHERE rs.card_id IS NULL \
+                 UNION ALL \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
+                        'reverse' AS direction, c.created_at AS sort_key \
+                 FROM cards c \
+                 JOIN deck_cards dc ON dc.card_id = c.id AND dc.deck_id = $3 \
+                 LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 AND rs.direction = 'reverse' \
+                 WHERE c.two_way AND rs.card_id IS NULL \
+             ) combined ORDER BY sort_key ASC LIMIT $2",
         )
         .bind(user_id)
         .bind(limit)
         .bind(deck_id)
         .fetch_all(pool)
-        .await
+        .await?
     } else {
         sqlx::query_as(
-            "SELECT c.id, c.image_url, c.target_text FROM cards c \
-             LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 \
-             WHERE rs.card_id IS NULL ORDER BY c.created_at ASC LIMIT $2",
+            "SELECT id, image_url, audio_url, video_url, youtube_url, target_text, direction FROM ( \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
+                        'forward' AS direction, c.created_at AS sort_key \
+                 FROM cards c \
+                 LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 AND rs.direction = 'forward' \
+                 WHERE rs.card_id IS NULL \
+                 UNION ALL \
+                 SELECT c.id, c.image_url, c.audio_url, c.video_url, c.youtube_url, c.target_text, \
+                        'reverse' AS direction, c.created_at AS sort_key \
+                 FROM cards c \
+                 LEFT JOIN review_state rs ON rs.card_id = c.id AND rs.user_id = $1 AND rs.direction = 'reverse' \
+                 WHERE c.two_way AND rs.card_id IS NULL \
+             ) combined ORDER BY sort_key ASC LIMIT $2",
         )
         .bind(user_id)
         .bind(limit)
         .fetch_all(pool)
-        .await
-    }
+        .await?
+    };
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 async fn new_cards_introduced_today(pool: &PgPool, user_id: Uuid) -> sqlx::Result<i64> {
@@ -640,14 +803,24 @@ mod tests {
             .unwrap()
     }
 
+    fn card_with_text(target_text: &str) -> NewCard<'_> {
+        NewCard {
+            target_text,
+            ..Default::default()
+        }
+    }
+
     #[sqlx::test(migrations = "../../migrations")]
     async fn created_card_appears_in_list_with_its_tags(pool: PgPool) {
         let user_id = test_user(&pool).await;
         let card_id = create_card(
             &pool,
             user_id,
-            "https://example.com/cat.jpg",
-            "gato",
+            NewCard {
+                image_url: "https://example.com/cat.jpg",
+                target_text: "gato",
+                ..Default::default()
+            },
             &["animals".to_string(), "beginner".to_string()],
         )
         .await
@@ -665,12 +838,22 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn list_cards_filters_by_tag(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        create_card(&pool, user_id, "", "gato", &["animals".to_string()])
-            .await
-            .unwrap();
-        create_card(&pool, user_id, "", "trabajo", &["work".to_string()])
-            .await
-            .unwrap();
+        create_card(
+            &pool,
+            user_id,
+            card_with_text("gato"),
+            &["animals".to_string()],
+        )
+        .await
+        .unwrap();
+        create_card(
+            &pool,
+            user_id,
+            card_with_text("trabajo"),
+            &["work".to_string()],
+        )
+        .await
+        .unwrap();
 
         let animals = list_cards(&pool, Some("animals"), None).await.unwrap();
         assert_eq!(animals.len(), 1);
@@ -680,13 +863,31 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn update_card_replaces_fields_and_tags(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "old.jpg", "old", &["old-tag".to_string()])
-            .await
-            .unwrap();
+        let card_id = create_card(
+            &pool,
+            user_id,
+            NewCard {
+                image_url: "old.jpg",
+                target_text: "old",
+                ..Default::default()
+            },
+            &["old-tag".to_string()],
+        )
+        .await
+        .unwrap();
 
-        update_card(&pool, card_id, "new.jpg", "new", &["new-tag".to_string()])
-            .await
-            .unwrap();
+        update_card(
+            &pool,
+            card_id,
+            NewCard {
+                image_url: "new.jpg",
+                target_text: "new",
+                ..Default::default()
+            },
+            &["new-tag".to_string()],
+        )
+        .await
+        .unwrap();
 
         let card = get_card(&pool, card_id).await.unwrap().unwrap();
         assert_eq!(card.target_text, "new");
@@ -695,9 +896,44 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
+    async fn update_card_can_attach_audio_and_video_and_mark_two_way(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
+
+        update_card(
+            &pool,
+            card_id,
+            NewCard {
+                audio_url: "audio.mp3",
+                video_url: "video.mp4",
+                youtube_url: "https://www.youtube.com/embed/dQw4w9WgXcQ",
+                target_text: "word",
+                two_way: true,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let card = get_card(&pool, card_id).await.unwrap().unwrap();
+        assert_eq!(card.audio_url, Some("audio.mp3".to_string()));
+        assert_eq!(card.video_url, Some("video.mp4".to_string()));
+        assert_eq!(
+            card.youtube_url,
+            Some("https://www.youtube.com/embed/dQw4w9WgXcQ".to_string())
+        );
+        assert!(card.two_way);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
     async fn delete_card_removes_it_from_the_list(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
 
         delete_card(&pool, card_id).await.unwrap();
 
@@ -708,10 +944,10 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn deck_scopes_card_list_and_review_queue(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let in_deck = create_card(&pool, user_id, "", "in-deck", &[])
+        let in_deck = create_card(&pool, user_id, card_with_text("in-deck"), &[])
             .await
             .unwrap();
-        let _out_of_deck = create_card(&pool, user_id, "", "out-of-deck", &[])
+        let _out_of_deck = create_card(&pool, user_id, card_with_text("out-of-deck"), &[])
             .await
             .unwrap();
 
@@ -732,7 +968,9 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn removing_a_card_from_a_deck_excludes_it_again(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
         let deck_id = create_deck(&pool, user_id, "Deck").await.unwrap();
         add_card_to_deck(&pool, deck_id, card_id).await.unwrap();
 
@@ -751,7 +989,9 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn creating_a_card_adds_it_to_the_default_deck(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
 
         let decks = list_decks(&pool).await.unwrap();
         assert_eq!(decks.len(), 1);
@@ -765,8 +1005,12 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn two_cards_share_the_same_default_deck(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        create_card(&pool, user_id, "", "one", &[]).await.unwrap();
-        create_card(&pool, user_id, "", "two", &[]).await.unwrap();
+        create_card(&pool, user_id, card_with_text("one"), &[])
+            .await
+            .unwrap();
+        create_card(&pool, user_id, card_with_text("two"), &[])
+            .await
+            .unwrap();
 
         // One Default deck, not a fresh one per card.
         assert_eq!(list_decks(&pool).await.unwrap().len(), 1);
@@ -787,7 +1031,9 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn deleting_a_deck_removes_it_and_its_card_memberships(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
         let deck_id = create_deck(&pool, user_id, "Temp").await.unwrap();
         add_card_to_deck(&pool, deck_id, card_id).await.unwrap();
 
@@ -808,18 +1054,24 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn get_review_state_defaults_when_never_graded(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
 
-        let state = get_review_state(&pool, user_id, card_id).await.unwrap();
+        let state = get_review_state(&pool, user_id, card_id, Direction::Forward)
+            .await
+            .unwrap();
         assert_eq!(state, ReviewState::default());
     }
 
     #[sqlx::test(migrations = "../../migrations")]
     async fn record_review_schedules_and_logs_in_one_go(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
 
-        let next = record_review(&pool, user_id, card_id, Grade::Good)
+        let next = record_review(&pool, user_id, card_id, Grade::Good, Direction::Forward)
             .await
             .unwrap();
         assert_eq!(next.repetitions, 1);
@@ -839,12 +1091,14 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn record_review_upserts_rather_than_duplicates_state(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
-
-        record_review(&pool, user_id, card_id, Grade::Good)
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
             .await
             .unwrap();
-        record_review(&pool, user_id, card_id, Grade::Good)
+
+        record_review(&pool, user_id, card_id, Grade::Good, Direction::Forward)
+            .await
+            .unwrap();
+        record_review(&pool, user_id, card_id, Grade::Good, Direction::Forward)
             .await
             .unwrap();
 
@@ -858,7 +1112,9 @@ mod tests {
         .unwrap();
         assert_eq!(row_count, 1);
 
-        let state = get_review_state(&pool, user_id, card_id).await.unwrap();
+        let state = get_review_state(&pool, user_id, card_id, Direction::Forward)
+            .await
+            .unwrap();
         assert_eq!(state.repetitions, 2);
         // The exact FSRS-fitted interval is covered by crates/domain's
         // own tests; this test's job is only to confirm the upsert kept
@@ -867,9 +1123,69 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
+    async fn two_way_cards_schedule_each_direction_independently(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let card_id = create_card(
+            &pool,
+            user_id,
+            NewCard {
+                target_text: "word",
+                two_way: true,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+        // Before any review, a two-way card offers two independent "new"
+        // slots — one per direction — not one.
+        let before = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(before.new_available_today, 2);
+
+        record_review(&pool, user_id, card_id, Grade::Good, Direction::Forward)
+            .await
+            .unwrap();
+
+        // Grading the forward direction doesn't touch the reverse one:
+        // it's still new, and forward isn't due again immediately.
+        let after_forward = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(after_forward.new_available_today, 1);
+        assert_eq!(after_forward.due_review_count, 0);
+
+        let forward_state = get_review_state(&pool, user_id, card_id, Direction::Forward)
+            .await
+            .unwrap();
+        let reverse_state = get_review_state(&pool, user_id, card_id, Direction::Reverse)
+            .await
+            .unwrap();
+        assert_eq!(forward_state.repetitions, 1);
+        assert_eq!(reverse_state, ReviewState::default());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn non_two_way_cards_only_ever_offer_the_forward_direction(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
+
+        let queue = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
+            .await
+            .unwrap();
+        assert_eq!(queue.new_available_today, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
     async fn grading_removes_card_from_due_review_until_its_next_interval(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
 
         // Before any review, it's a "new" card, not a "due review" one.
         let before = review_queue(&pool, user_id, None, ReviewOrder::DueDate)
@@ -878,7 +1194,7 @@ mod tests {
         assert_eq!(before.due_review_count, 0);
         assert_eq!(before.new_available_today, 1);
 
-        record_review(&pool, user_id, card_id, Grade::Good)
+        record_review(&pool, user_id, card_id, Grade::Good, Direction::Forward)
             .await
             .unwrap();
 
@@ -898,10 +1214,10 @@ mod tests {
             .await
             .unwrap();
 
-        create_card(&pool, user_id, "", "new-one", &[])
+        create_card(&pool, user_id, card_with_text("new-one"), &[])
             .await
             .unwrap();
-        create_card(&pool, user_id, "", "new-two", &[])
+        create_card(&pool, user_id, card_with_text("new-two"), &[])
             .await
             .unwrap();
 
@@ -922,8 +1238,10 @@ mod tests {
             .await
             .unwrap(); // no new cards allowed today at all
 
-        let card_id = create_card(&pool, user_id, "", "word", &[]).await.unwrap();
-        record_review(&pool, user_id, card_id, Grade::Again)
+        let card_id = create_card(&pool, user_id, card_with_text("word"), &[])
+            .await
+            .unwrap();
+        record_review(&pool, user_id, card_id, Grade::Again, Direction::Forward)
             .await
             .unwrap(); // introduces it, schedules a ~10-minute relearning step
 
@@ -955,12 +1273,14 @@ mod tests {
             .await
             .unwrap();
 
-        let first = create_card(&pool, user_id, "", "first", &[]).await.unwrap();
-        create_card(&pool, user_id, "", "second", &[])
+        let first = create_card(&pool, user_id, card_with_text("first"), &[])
+            .await
+            .unwrap();
+        create_card(&pool, user_id, card_with_text("second"), &[])
             .await
             .unwrap();
 
-        record_review(&pool, user_id, first, Grade::Good)
+        record_review(&pool, user_id, first, Grade::Good, Direction::Forward)
             .await
             .unwrap();
 
@@ -976,14 +1296,14 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn relapsing_counts_as_a_lapse_and_is_visible_in_stats(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let card_id = create_card(&pool, user_id, "", "hard-word", &[])
+        let card_id = create_card(&pool, user_id, card_with_text("hard-word"), &[])
             .await
             .unwrap();
 
-        record_review(&pool, user_id, card_id, Grade::Good)
+        record_review(&pool, user_id, card_id, Grade::Good, Direction::Forward)
             .await
             .unwrap();
-        record_review(&pool, user_id, card_id, Grade::Again)
+        record_review(&pool, user_id, card_id, Grade::Again, Direction::Forward)
             .await
             .unwrap();
 
@@ -996,11 +1316,19 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn user_stats_counts_reviews_logged_today(pool: PgPool) {
         let user_id = test_user(&pool).await;
-        let a = create_card(&pool, user_id, "", "a", &[]).await.unwrap();
-        let b = create_card(&pool, user_id, "", "b", &[]).await.unwrap();
+        let a = create_card(&pool, user_id, card_with_text("a"), &[])
+            .await
+            .unwrap();
+        let b = create_card(&pool, user_id, card_with_text("b"), &[])
+            .await
+            .unwrap();
 
-        record_review(&pool, user_id, a, Grade::Good).await.unwrap();
-        record_review(&pool, user_id, b, Grade::Easy).await.unwrap();
+        record_review(&pool, user_id, a, Grade::Good, Direction::Forward)
+            .await
+            .unwrap();
+        record_review(&pool, user_id, b, Grade::Easy, Direction::Forward)
+            .await
+            .unwrap();
 
         let stats = user_stats(&pool, user_id).await.unwrap();
         assert_eq!(stats.reviews_today, 2);
