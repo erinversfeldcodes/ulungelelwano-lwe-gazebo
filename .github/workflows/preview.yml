@@ -48,6 +48,31 @@ jobs:
           branch: preview/pr-${{ github.event.number }}
           parent: true
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+      # reset-branch-action fetches this host/password immediately after
+      # the reset call returns, but under the hood a reset is actually a
+      # swap-in-new-timeline-and-delete-the-old-one — and the branch's
+      # compute doesn't necessarily converge onto that swapped state
+      # instantly. Confirmed via Neon's own operation history: on one
+      # reset, the swap's own operations reported "finished" nearly 100s
+      # before Neon's post-reset check_availability operation even
+      # started. Handing Fly a password before that convergence completes
+      # is exactly what made every preview deploy crash-loop on "password
+      # authentication failed" — so don't trust the action's output until
+      # a real connection with it actually succeeds.
+      - name: Wait until the reset branch's credentials actually work
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          url="postgresql://neondb_owner:${{ steps.reset.outputs.password }}@${{ steps.reset.outputs.host }}/neondb?sslmode=require"
+          for attempt in $(seq 1 30); do
+            if psql "$url" -c "select 1" >/dev/null 2>&1; then
+              echo "branch credentials are live (attempt $attempt)"
+              exit 0
+            fi
+            echo "attempt $attempt: branch not ready yet, retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::preview/pr-${{ github.event.number }} never became connectable with its post-reset credentials"
+          exit 1
 
   deploy-preview:
     name: Deploy Fly preview app
