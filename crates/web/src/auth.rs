@@ -328,6 +328,109 @@ pub async fn confirm_password_reset(
     Ok(())
 }
 
+/// Checks `password` against the signed-in user's actual password hash,
+/// falling back to [`dummy_password_hash`] when there isn't one yet (the
+/// pre-reset state of a migrated magic-link account) — same timing-safe
+/// non-match as [`log_in`], just keyed by user id instead of email since
+/// the caller already has an authenticated session.
+async fn verify_current_password(
+    pool: &PgPool,
+    user_id: Uuid,
+    password: &str,
+) -> Result<(), String> {
+    let hash: Option<String> = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let hash = hash.unwrap_or_else(|| dummy_password_hash().to_string());
+
+    if verify_password(password, &hash) {
+        Ok(())
+    } else {
+        Err("incorrect password".to_string())
+    }
+}
+
+/// Updates the signed-in user's display name. No current-password check —
+/// unlike email/password below, this isn't a credential change, just
+/// cosmetic.
+pub async fn update_name(pool: &PgPool, user_id: Uuid, new_name: &str) -> Result<(), String> {
+    let name = new_name.trim();
+    if name.is_empty() {
+        return Err("please enter a name".to_string());
+    }
+    sqlx::query("UPDATE users SET name = $1 WHERE id = $2")
+        .bind(name)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Changes the signed-in user's email, after confirming their current
+/// password — this is credential-adjacent (it's what logins and password
+/// resets go to), so it isn't allowed on session trust alone. Doesn't
+/// re-verify the new address by sending a confirmation link, matching this
+/// app's small-trusted-group model rather than a public signup's.
+pub async fn update_email(
+    pool: &PgPool,
+    user_id: Uuid,
+    current_password: &str,
+    new_email: &str,
+) -> Result<(), String> {
+    verify_current_password(pool, user_id, current_password).await?;
+    let email = new_email.trim().to_lowercase();
+    validate_email(&email)?;
+
+    sqlx::query("UPDATE users SET email = $1 WHERE id = $2")
+        .bind(&email)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                "an account with that email already exists".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
+    Ok(())
+}
+
+/// Changes the signed-in user's password, after confirming their current
+/// one. Revokes every session for the account afterward, including the one
+/// making this change — same as redeeming a password-reset token — so the
+/// caller should send the user back to sign in with the new password.
+pub async fn change_password(
+    pool: &PgPool,
+    user_id: Uuid,
+    current_password: &str,
+    new_password: &str,
+) -> Result<(), String> {
+    verify_current_password(pool, user_id, current_password).await?;
+    validate_password(new_password)?;
+    let password_hash = hash_password(new_password)?;
+
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(&password_hash)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 pub async fn user_for_session(pool: &PgPool, session_token: &str) -> Option<UserRow> {
     sqlx::query_as::<_, UserRow>(
         "SELECT u.id, u.email, u.name FROM sessions s \
@@ -690,5 +793,139 @@ mod tests {
         assert!(user_for_session(&pool, &session_token).await.is_some());
         delete_session(&pool, &session_token).await;
         assert!(user_for_session(&pool, &session_token).await.is_none());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_name_changes_the_display_name(pool: PgPool) {
+        let session_token = sign_up(&pool, "name@example.com", "Old Name", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        update_name(&pool, user.id, "New Name").await.unwrap();
+
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+        assert_eq!(user.name, "New Name");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_name_rejects_an_empty_name(pool: PgPool) {
+        let session_token = sign_up(&pool, "empty@example.com", "Someone", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        assert!(update_name(&pool, user.id, "   ").await.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_email_requires_the_correct_current_password(pool: PgPool) {
+        let session_token = sign_up(&pool, "old@example.com", "Someone", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        let result = update_email(&pool, user.id, "wrong-password", "new@example.com").await;
+
+        assert!(result.is_err());
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+        assert_eq!(user.email, "old@example.com", "email should be unchanged");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_email_changes_it_with_the_right_password(pool: PgPool) {
+        let session_token = sign_up(&pool, "old2@example.com", "Someone", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        update_email(&pool, user.id, "correct-horse", "New2@Example.com")
+            .await
+            .unwrap();
+
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+        assert_eq!(user.email, "new2@example.com", "email should be lowercased");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_email_rejects_a_duplicate(pool: PgPool) {
+        sign_up(&pool, "taken@example.com", "First", "correct-horse")
+            .await
+            .unwrap();
+        let session_token = sign_up(&pool, "second@example.com", "Second", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        let result = update_email(&pool, user.id, "correct-horse", "taken@example.com").await;
+
+        assert!(result.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn update_email_fails_against_a_null_password_hash_user(pool: PgPool) {
+        let user_id: Uuid =
+            sqlx::query_scalar("INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id")
+                .bind("migrated@example.com")
+                .bind("Migrating User")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let result = update_email(&pool, user_id, "whatever", "new@example.com").await;
+
+        assert!(result.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn change_password_requires_the_correct_current_password(pool: PgPool) {
+        let session_token = sign_up(&pool, "cp1@example.com", "Someone", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        let result = change_password(&pool, user.id, "wrong-password", "new-password-123").await;
+
+        assert!(result.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn change_password_allows_logging_in_with_the_new_password(pool: PgPool) {
+        let session_token = sign_up(&pool, "cp2@example.com", "Someone", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        change_password(&pool, user.id, "correct-horse", "new-password-123")
+            .await
+            .unwrap();
+
+        assert!(
+            log_in(&pool, "cp2@example.com", "correct-horse")
+                .await
+                .is_err()
+        );
+        assert!(
+            log_in(&pool, "cp2@example.com", "new-password-123")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn change_password_revokes_every_existing_session(pool: PgPool) {
+        let session_token = sign_up(&pool, "cp3@example.com", "Someone", "correct-horse")
+            .await
+            .unwrap();
+        let user = user_for_session(&pool, &session_token).await.unwrap();
+
+        change_password(&pool, user.id, "correct-horse", "new-password-123")
+            .await
+            .unwrap();
+
+        assert!(
+            user_for_session(&pool, &session_token).await.is_none(),
+            "the session active during the change should be revoked too"
+        );
     }
 }

@@ -3,8 +3,8 @@
 #![allow(clippy::must_use_candidate)]
 
 use crate::account::{
-    ConfirmPasswordReset, LogIn, RequestPasswordReset, SetDailyNewCardLimit, SignUp,
-    current_user_name, user_stats,
+    ChangePassword, ConfirmPasswordReset, LogIn, RequestPasswordReset, SetDailyNewCardLimit,
+    SignUp, UpdateEmail, UpdateName, current_profile, current_user_name, user_stats,
 };
 use crate::cards::{
     DeleteCard, DirectionInput, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags,
@@ -75,6 +75,7 @@ pub fn App() -> impl IntoView {
                                 " · "<A href="/review">"Review"</A>
                                 " · "<A href="/stats">"Stats"</A>
                                 " · "<A href="/settings">"Settings"</A>
+                                " · "<A href="/account">"Account"</A>
                                 " · "<a href="/auth/logout">"Sign out"</a>
                             }.into_any(),
                             None => view! {
@@ -94,6 +95,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("review") view=ReviewPage/>
                     <Route path=StaticSegment("stats") view=StatsPage/>
                     <Route path=StaticSegment("settings") view=SettingsPage/>
+                    <Route path=StaticSegment("account") view=AccountPage/>
                     <Route path=StaticSegment("login") view=LoginPage/>
                     <Route path=StaticSegment("signup") view=SignupPage/>
                     <Route path=StaticSegment("forgot-password") view=ForgotPasswordPage/>
@@ -878,6 +880,96 @@ fn SettingsPage() -> impl IntoView {
                         </label>
                         <button type="submit">"Save"</button>
                     </ActionForm>
+                }
+                .into_any()
+            })}
+        </Transition>
+    }
+}
+
+#[component]
+fn AccountPage() -> impl IntoView {
+    let auth = Resource::new(|| (), |()| current_user_name());
+    let update_name = ServerAction::<UpdateName>::new();
+    let update_email = ServerAction::<UpdateEmail>::new();
+    let change_password = ServerAction::<ChangePassword>::new();
+    // Re-fetched after either name or email actually saves, so the forms
+    // below reflect the new value rather than the stale one they were
+    // first loaded with.
+    let profile = Resource::new(
+        move || (update_name.version().get(), update_email.version().get()),
+        |_| current_profile(),
+    );
+
+    // Changing the password revokes every session server-side (see
+    // account::change_password), so the only sane place left to land is
+    // the login page — same message LoginPage already shows after a
+    // password-reset redemption.
+    Effect::new(move |_| {
+        if matches!(change_password.value().get(), Some(Ok(()))) {
+            reload_to("/login?reset=success");
+        }
+    });
+
+    view! {
+        <h1>"Account"</h1>
+        <Transition fallback=|| view! { <p>"Loading…"</p> }>
+            {move || Suspend::new(async move {
+                if auth.await.ok().flatten().is_none() {
+                    return view! { <Redirect path="/login"/> }.into_any();
+                }
+                let current = profile.await.ok();
+                let name_value = current.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                let email_value = current.as_ref().map(|p| p.email.clone()).unwrap_or_default();
+
+                view! {
+                    <h2>"Name"</h2>
+                    <ActionForm action=update_name>
+                        <label>"Name" <input type="text" name="name" value=name_value /></label>
+                        <button type="submit">"Save"</button>
+                    </ActionForm>
+                    {move || {
+                        update_name.value().get().and_then(Result::err).map(|e| {
+                            view! { <p>"Error: " {e.to_string()}</p> }
+                        })
+                    }}
+
+                    <h2>"Email"</h2>
+                    <ActionForm action=update_email>
+                        <label>
+                            "New email"
+                            <input type="email" name="new_email" value=email_value />
+                        </label>
+                        <label>
+                            "Current password"
+                            <input type="password" name="current_password" />
+                        </label>
+                        <button type="submit">"Save"</button>
+                    </ActionForm>
+                    {move || {
+                        update_email.value().get().and_then(Result::err).map(|e| {
+                            view! { <p>"Error: " {e.to_string()}</p> }
+                        })
+                    }}
+
+                    <h2>"Password"</h2>
+                    <ActionForm action=change_password>
+                        <label>
+                            "Current password"
+                            <input type="password" name="current_password" />
+                        </label>
+                        <label>"New password" <input type="password" name="new_password" /></label>
+                        <label>
+                            "Confirm new password"
+                            <input type="password" name="confirm_password" />
+                        </label>
+                        <button type="submit">"Change password"</button>
+                    </ActionForm>
+                    {move || {
+                        change_password.value().get().and_then(Result::err).map(|e| {
+                            view! { <p>"Error: " {e.to_string()}</p> }
+                        })
+                    }}
                 }
                 .into_any()
             })}

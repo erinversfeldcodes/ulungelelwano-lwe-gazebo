@@ -105,6 +105,66 @@ pub async fn current_user_name() -> Result<Option<String>, ServerFnError> {
         .map(|u| u.name))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub email: String,
+}
+
+#[server]
+pub async fn current_profile() -> Result<Profile, ServerFnError> {
+    let user = require_user().await?;
+    Ok(Profile {
+        name: user.name,
+        email: user.email,
+    })
+}
+
+#[server]
+pub async fn update_name(name: String) -> Result<(), ServerFnError> {
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::update_name(&state.db_pool, user.id, &name)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+#[server]
+pub async fn update_email(
+    current_password: String,
+    new_email: String,
+) -> Result<(), ServerFnError> {
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::update_email(&state.db_pool, user.id, &current_password, &new_email)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+/// Revokes every session for the account server-side (same as redeeming a
+/// password-reset token), so the cookie on this request is cleared too —
+/// otherwise the browser would keep sending a token that no longer
+/// resolves to anyone.
+#[server]
+pub async fn change_password(
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if new_password != confirm_password {
+        return Err(ServerFnError::new("passwords do not match"));
+    }
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::change_password(&state.db_pool, user.id, &current_password, &new_password)
+        .await
+        .map_err(ServerFnError::new)?;
+    session_cookies()
+        .await?
+        .remove(tower_cookies::Cookie::new(crate::auth::SESSION_COOKIE, ""));
+    Ok(())
+}
+
 #[server]
 pub async fn get_daily_new_card_limit() -> Result<Option<i32>, ServerFnError> {
     let user = require_user().await?;
