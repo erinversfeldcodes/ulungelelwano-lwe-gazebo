@@ -332,6 +332,112 @@ async fn cards_new(
     Ok(axum::response::Redirect::to("/"))
 }
 
+/// One parsed-and-ready-to-create entry from the bulk-add page — a target
+/// word/phrase plus whichever image (uploaded file or search import) was
+/// attached to it. The English translation used to search for that image
+/// never reaches here at all — see `ImageSearchPicker`'s doc comment — so
+/// there's nothing to carry for it.
+#[cfg(feature = "ssr")]
+struct BulkDraftFields {
+    target_text: String,
+    image_url: Option<String>,
+}
+
+/// Parses `BulkAddPage`'s submission: one `<div>` per draft, each
+/// contributing its own `target_text_{i}`/`image_{i}`/`image_url_{i}`
+/// fields (indexed rather than one of each, since this form carries an
+/// unbounded number of cards at once — see `cards_bulk`). Field order
+/// within the multipart body isn't assumed; a `BTreeMap` keyed by index
+/// collects everything first, then gets flattened once the whole body has
+/// been read.
+#[cfg(feature = "ssr")]
+async fn parse_bulk_multipart(
+    state: &AppState,
+    multipart: &mut axum::extract::Multipart,
+) -> Result<Vec<BulkDraftFields>, (axum::http::StatusCode, String)> {
+    let mut target_texts: std::collections::BTreeMap<usize, String> =
+        std::collections::BTreeMap::new();
+    let mut image_urls: std::collections::BTreeMap<usize, String> =
+        std::collections::BTreeMap::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        // "image_url_" must be checked before "image_" — it's the more
+        // specific prefix, and would otherwise also match the latter.
+        if let Some(idx) = name
+            .strip_prefix("target_text_")
+            .and_then(|s| s.parse().ok())
+        {
+            target_texts.insert(idx, field.text().await.unwrap_or_default());
+        } else if let Some(idx) = name.strip_prefix("image_url_").and_then(|s| s.parse().ok()) {
+            let raw = field.text().await.unwrap_or_default();
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                image_urls.insert(idx, trimmed.to_string());
+            }
+        } else if let Some(idx) = name.strip_prefix("image_").and_then(|s| s.parse().ok())
+            && let Some(url) = upload_media_field(state, field, "image").await?
+        {
+            image_urls.insert(idx, url);
+        }
+    }
+
+    Ok(target_texts
+        .into_iter()
+        .filter_map(|(idx, target_text)| {
+            let target_text = target_text.trim().to_string();
+            (!target_text.is_empty()).then(|| BulkDraftFields {
+                target_text,
+                image_url: image_urls.get(&idx).cloned(),
+            })
+        })
+        .collect())
+}
+
+/// Creates every draft from `BulkAddPage` in one submission. Stops at the
+/// first failure — same bail-on-first-error semantics `cards_new` already
+/// uses — rather than inventing partial-success UX for what should be a
+/// rare failure mode (mainly a DB connectivity issue, since a storage
+/// upload failure already degrades to "no image" silently upstream).
+/// Drafts created before a later failure stay created; this isn't
+/// transactional.
+#[cfg(feature = "ssr")]
+async fn cards_bulk(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    cookies: tower_cookies::Cookies,
+    mut multipart: axum::extract::Multipart,
+) -> Result<axum::response::Redirect, (axum::http::StatusCode, String)> {
+    let user = web::auth::current_user(&state.db_pool, &cookies)
+        .await
+        .ok_or((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "not signed in".to_string(),
+        ))?;
+
+    let drafts = parse_bulk_multipart(&state, &mut multipart).await?;
+
+    for draft in drafts {
+        web::db::create_card(
+            &state.db_pool,
+            user.id,
+            web::db::NewCard {
+                image_url: draft.image_url.as_deref().unwrap_or(""),
+                target_text: &draft.target_text,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    Ok(axum::response::Redirect::to("/"))
+}
+
 #[cfg(feature = "ssr")]
 async fn cards_update(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -479,6 +585,7 @@ async fn main() {
         .route("/internal/email-check", axum::routing::get(email_check))
         .route("/internal/storage-check", axum::routing::get(storage_check))
         .route("/cards/new", axum::routing::post(cards_new))
+        .route("/cards/bulk", axum::routing::post(cards_bulk))
         .route("/cards/{id}", axum::routing::post(cards_update))
         .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell))
         .layer(tower_cookies::CookieManagerLayer::new())

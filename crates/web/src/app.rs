@@ -46,8 +46,15 @@ fn youtube_embed(url: String) -> impl IntoView {
 /// direct upload. The caller renders the resulting `chosen_image_url` as a
 /// hidden form field — see `NewCardPage`/`EditCardPage`.
 #[component]
-fn ImageSearchPicker(chosen_image_url: RwSignal<Option<String>>) -> impl IntoView {
-    let english_text = RwSignal::new(String::new());
+fn ImageSearchPicker(
+    chosen_image_url: RwSignal<Option<String>>,
+    /// Pre-fills the search field — used by `BulkAddPage`, where the
+    /// English word was already given as part of the pasted list, so the
+    /// user shouldn't have to retype it per card just to search.
+    #[prop(default = String::new())]
+    initial_query: String,
+) -> impl IntoView {
+    let english_text = RwSignal::new(initial_query.clone());
     let search = ServerAction::<SearchCardImages>::new();
     let import = ServerAction::<ImportCardImage>::new();
 
@@ -63,6 +70,7 @@ fn ImageSearchPicker(chosen_image_url: RwSignal<Option<String>>) -> impl IntoVie
                 "English translation (used only to search for an image — never stored on the card)"
                 <input
                     type="text"
+                    value=initial_query
                     on:input=move |ev| english_text.set(event_target_value(&ev))
                 />
             </label>
@@ -176,6 +184,7 @@ pub fn App() -> impl IntoView {
                         match auth.await.ok().flatten() {
                             Some(_) => view! {
                                 " · "<A href="/new">"Add a card"</A>
+                                " · "<A href="/bulk-add">"Bulk add"</A>
                                 " · "<A href="/review">"Review"</A>
                                 " · "<A href="/stats">"Stats"</A>
                                 " · "<A href="/settings">"Settings"</A>
@@ -194,6 +203,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| "Page not found.">
                     <Route path=StaticSegment("") view=CardListPage/>
                     <Route path=StaticSegment("new") view=NewCardPage/>
+                    <Route path=StaticSegment("bulk-add") view=BulkAddPage/>
                     <Route path=path!("/cards/:id") view=EditCardPage/>
                     <Route path=StaticSegment("decks") view=DecksPage/>
                     <Route path=StaticSegment("review") view=ReviewPage/>
@@ -472,6 +482,152 @@ fn NewCardPage() -> impl IntoView {
                             "Two-way: also review back → front, scheduled independently"
                         </label>
                         <button type="submit">"Add"</button>
+                    </form>
+                }
+                .into_any()
+            })}
+        </Transition>
+    }
+}
+
+/// One parsed line from the pasted list, waiting on the page for an image
+/// before the batch is submitted. `key` is stable across this page's
+/// lifetime (assigned once at parse time, never reused) so each draft's
+/// own `ImageSearchPicker` keeps its chosen image if anything elsewhere on
+/// the page re-renders.
+#[derive(Debug, Clone)]
+struct BulkDraft {
+    key: usize,
+    english: String,
+    target_text: String,
+}
+
+/// Parses one `english,target word` line. The first comma splits english
+/// from the target phrase; anything after a *second* comma stays part of
+/// the target phrase rather than being treated as a parse error, so a
+/// target phrase that itself contains a comma still works. `None` means
+/// the line didn't look like "english,target" at all (missing comma, or
+/// either side empty after trimming).
+fn parse_bulk_line(line: &str) -> Option<(String, String)> {
+    let (english, target) = line.trim().split_once(',')?;
+    let english = english.trim();
+    let target = target.trim();
+    (!english.is_empty() && !target.is_empty()).then(|| (english.to_string(), target.to_string()))
+}
+
+#[component]
+fn BulkAddPage() -> impl IntoView {
+    let auth = Resource::new(|| (), |()| current_user_name());
+    let raw_input = RwSignal::new(String::new());
+    let drafts: RwSignal<Vec<BulkDraft>> = RwSignal::new(Vec::new());
+    let skipped_lines: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let next_key = RwSignal::new(0usize);
+
+    // Parsing replaces `drafts` wholesale, which would also wipe out any
+    // images already chosen on a re-parse — deliberately only ever
+    // triggered by this explicit click, never reactively on every
+    // keystroke, so starting to pick images is a safe point to stop
+    // touching the textarea.
+    let parse = move |_| {
+        let mut parsed = Vec::new();
+        let mut skipped = Vec::new();
+        for line in raw_input.get_untracked().lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match parse_bulk_line(line) {
+                Some((english, target_text)) => {
+                    let key = next_key.get_untracked();
+                    next_key.set(key + 1);
+                    parsed.push(BulkDraft {
+                        key,
+                        english,
+                        target_text,
+                    });
+                }
+                None => skipped.push(line.to_string()),
+            }
+        }
+        drafts.set(parsed);
+        skipped_lines.set(skipped);
+    };
+
+    view! {
+        <h1>"Bulk add cards"</h1>
+        <Transition fallback=|| view! { <p>"Loading…"</p> }>
+            {move || Suspend::new(async move {
+                if auth.await.ok().flatten().is_none() {
+                    return view! { <Redirect path="/login"/> }.into_any();
+                }
+                view! {
+                    <label>
+                        "Paste one card per line: english,target word"
+                        <textarea
+                            rows="8"
+                            on:input=move |ev| raw_input.set(event_target_value(&ev))
+                        ></textarea>
+                    </label>
+                    <button type="button" on:click=parse>"Parse"</button>
+                    {move || {
+                        let skipped = skipped_lines.get();
+                        (!skipped.is_empty()).then(|| {
+                            let count = skipped.len();
+                            let lines = skipped.join("; ");
+                            view! {
+                                <p>
+                                    "Skipped " {count}
+                                    " line(s) that weren't \"english,word\": " {lines}
+                                </p>
+                            }
+                        })
+                    }}
+                    <form method="post" action="/cards/bulk" enctype="multipart/form-data">
+                        {move || {
+                            drafts
+                                .get()
+                                .into_iter()
+                                .map(|draft| {
+                                    let chosen_image_url: RwSignal<Option<String>> = RwSignal::new(None);
+                                    let idx = draft.key;
+                                    view! {
+                                        <div class="bulk-draft">
+                                            <input
+                                                type="hidden"
+                                                name=format!("target_text_{idx}")
+                                                value=draft.target_text.clone()
+                                            />
+                                            <p>{draft.target_text.clone()} " (" {draft.english.clone()} ")"</p>
+                                            <label>
+                                                "Image file"
+                                                <input
+                                                    type="file"
+                                                    name=format!("image_{idx}")
+                                                    accept="image/*"
+                                                />
+                                            </label>
+                                            <ImageSearchPicker
+                                                chosen_image_url=chosen_image_url
+                                                initial_query=draft.english
+                                            />
+                                            {move || {
+                                                chosen_image_url.get().map(|url| view! {
+                                                    <input
+                                                        type="hidden"
+                                                        name=format!("image_url_{idx}")
+                                                        value=url
+                                                    />
+                                                })
+                                            }}
+                                        </div>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                        {move || {
+                            (!drafts.get().is_empty())
+                                .then(|| view! { <button type="submit">"Create all cards"</button> })
+                        }}
                     </form>
                 }
                 .into_any()
@@ -1092,5 +1248,54 @@ fn AccountPage() -> impl IntoView {
                 .into_any()
             })}
         </Transition>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bulk_line;
+
+    #[test]
+    fn parses_a_plain_line() {
+        assert_eq!(
+            parse_bulk_line("dog,perro"),
+            Some(("dog".to_string(), "perro".to_string()))
+        );
+    }
+
+    #[test]
+    fn trims_whitespace_on_both_sides() {
+        assert_eq!(
+            parse_bulk_line("  dog , perro  "),
+            Some(("dog".to_string(), "perro".to_string()))
+        );
+    }
+
+    #[test]
+    fn keeps_a_second_comma_as_part_of_the_target_phrase() {
+        assert_eq!(
+            parse_bulk_line("hello, how are you,hola, ¿cómo estás?"),
+            Some((
+                "hello".to_string(),
+                "how are you,hola, ¿cómo estás?".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_a_line_with_no_comma() {
+        assert_eq!(parse_bulk_line("just one word"), None);
+    }
+
+    #[test]
+    fn rejects_a_line_with_an_empty_side() {
+        assert_eq!(parse_bulk_line(",perro"), None);
+        assert_eq!(parse_bulk_line("dog,"), None);
+        assert_eq!(parse_bulk_line(" , "), None);
+    }
+
+    #[test]
+    fn rejects_an_empty_line() {
+        assert_eq!(parse_bulk_line(""), None);
     }
 }
