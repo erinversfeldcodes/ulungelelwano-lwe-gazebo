@@ -7,8 +7,8 @@ use crate::account::{
     SignUp, UpdateEmail, UpdateName, current_profile, current_user_name, user_stats,
 };
 use crate::cards::{
-    DeleteCard, DirectionInput, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags,
-    review_queue,
+    DeleteCard, DirectionInput, GradeCard, GradeInput, ImageSearchResult, ImportCardImage,
+    ReviewOrderInput, SearchCardImages, get_card, list_tags, review_queue,
 };
 use crate::decks::{
     AddCardToDeck, CreateDeck, DeleteDeck, RemoveCardFromDeck, RenameDeck, list_decks,
@@ -33,6 +33,110 @@ use uuid::Uuid;
 /// repeated, since it's the exact same three attributes everywhere.
 fn youtube_embed(url: String) -> impl IntoView {
     view! { <iframe src=url width="560" height="315" allowfullscreen=true></iframe> }
+}
+
+/// Search-and-pick an image for a card's `image_url`, as an alternative to
+/// uploading a file directly. The English text here is deliberately never
+/// part of the submitted card form — it only ever drives
+/// `search_card_images`, never gets stored or shown on the card itself
+/// (unlike target_text, which is the target-language word/phrase).
+/// Picking a thumbnail re-fetches and re-hosts the full image server-side
+/// (see `cards::import_card_image`) rather than linking the provider's own
+/// URL, so a card's image is always something this app hosts, same as a
+/// direct upload. The caller renders the resulting `chosen_image_url` as a
+/// hidden form field — see `NewCardPage`/`EditCardPage`.
+#[component]
+fn ImageSearchPicker(chosen_image_url: RwSignal<Option<String>>) -> impl IntoView {
+    let english_text = RwSignal::new(String::new());
+    let search = ServerAction::<SearchCardImages>::new();
+    let import = ServerAction::<ImportCardImage>::new();
+
+    Effect::new(move |_| {
+        if let Some(Ok(url)) = import.value().get() {
+            chosen_image_url.set(Some(url));
+        }
+    });
+
+    view! {
+        <div class="image-search">
+            <label>
+                "English translation (used only to search for an image — never stored on the card)"
+                <input
+                    type="text"
+                    on:input=move |ev| english_text.set(event_target_value(&ev))
+                />
+            </label>
+            <button
+                type="button"
+                on:click=move |_| {
+                    search.dispatch(SearchCardImages { query: english_text.get_untracked() });
+                }
+            >
+                "Search images"
+            </button>
+            {move || search.pending().get().then(|| view! { <p>"Searching…"</p> })}
+            {move || {
+                // Distinguishes "haven't searched yet" (None, show nothing)
+                // from "searched and every provider came back empty" (an
+                // Ok with no results) — without this, a search that
+                // genuinely found nothing looks identical to never having
+                // searched at all, with no signal that redoing it with
+                // different text might help.
+                search.value().get().and_then(|result| match result {
+                    Ok(results) if results.is_empty() => {
+                        Some(view! { <p>"No images found — try different search text."</p> }.into_any())
+                    }
+                    Ok(_) => None,
+                    Err(e) => Some(view! { <p>"Error: " {e.to_string()}</p> }.into_any()),
+                })
+            }}
+            <div class="image-search-results">
+                {move || {
+                    let results: Vec<ImageSearchResult> = search
+                        .value()
+                        .get()
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
+                    results
+                        .into_iter()
+                        .map(|r| {
+                            let provider = r.provider.clone();
+                            let id = r.id.clone();
+                            view! {
+                                <img
+                                    src=r.thumbnail_url
+                                    alt=r.description
+                                    class="image-search-thumb"
+                                    on:click=move |_| {
+                                        import.dispatch(ImportCardImage {
+                                            provider: provider.clone(),
+                                            id: id.clone(),
+                                        });
+                                    }
+                                />
+                            }
+                        })
+                        .collect_view()
+                }}
+            </div>
+            {move || import.pending().get().then(|| view! { <p>"Adding image…"</p> })}
+            {move || {
+                import.value().get().and_then(Result::err).map(|e| {
+                    view! { <p>"Error: " {e.to_string()}</p> }
+                })
+            }}
+            {move || {
+                chosen_image_url.get().map(|url| view! {
+                    <div class="image-search-chosen">
+                        <img src=url alt="chosen image" />
+                        <button type="button" on:click=move |_| chosen_image_url.set(None)>
+                            "Remove"
+                        </button>
+                    </div>
+                })
+            }}
+        </div>
+    }
 }
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -325,6 +429,7 @@ fn NewCardPage() -> impl IntoView {
     let auth = Resource::new(|| (), |()| current_user_name());
     let audio_input: NodeRef<html::Input> = NodeRef::new();
     let video_input: NodeRef<html::Input> = NodeRef::new();
+    let chosen_image_url: RwSignal<Option<String>> = RwSignal::new(None);
 
     view! {
         <h1>"Add a card"</h1>
@@ -336,6 +441,12 @@ fn NewCardPage() -> impl IntoView {
                 view! {
                     <form method="post" action="/cards/new" enctype="multipart/form-data">
                         <label>"Image file" <input type="file" name="image" accept="image/*" /></label>
+                        <ImageSearchPicker chosen_image_url=chosen_image_url />
+                        {move || {
+                            chosen_image_url.get().map(|url| view! {
+                                <input type="hidden" name="image_url" value=url />
+                            })
+                        }}
                         <label>
                             "Audio file"
                             <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
@@ -393,6 +504,7 @@ fn EditCardPage() -> impl IntoView {
     let untoggle_deck = ServerAction::<RemoveCardFromDeck>::new();
     let audio_input: NodeRef<html::Input> = NodeRef::new();
     let video_input: NodeRef<html::Input> = NodeRef::new();
+    let chosen_image_url: RwSignal<Option<String>> = RwSignal::new(None);
 
     let navigate = use_navigate();
     Effect::new(move |_| {
@@ -477,6 +589,12 @@ fn EditCardPage() -> impl IntoView {
                                         "Replace image (optional)"
                                         <input type="file" name="image" accept="image/*" />
                                     </label>
+                                    <ImageSearchPicker chosen_image_url=chosen_image_url />
+                                    {move || {
+                                        chosen_image_url.get().map(|url| view! {
+                                            <input type="hidden" name="image_url" value=url />
+                                        })
+                                    }}
                                     {remove_image}
                                     <label>
                                         "Replace audio (optional)"

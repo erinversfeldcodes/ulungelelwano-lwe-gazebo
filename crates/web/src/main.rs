@@ -95,18 +95,6 @@ async fn storage_check(
     }
 }
 
-fn random_key() -> String {
-    use rand::RngExt;
-    use std::fmt::Write as _;
-
-    let bytes: [u8; 16] = rand::rng().random();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(out, "{b:02x}").unwrap();
-    }
-    out
-}
-
 /// Uploads one `image`/`audio`/`video` multipart field to storage.
 /// Best-effort, same as before this was extracted: with no storage
 /// configured (e.g. local dev without the S3_* env vars set), an attached
@@ -128,7 +116,7 @@ async fn upload_media_field(
     }
     match (&state.storage, content_type) {
         (Some(storage), Some(content_type)) => {
-            let key = format!("cards/{}", random_key());
+            let key = format!("cards/{}", web::storage::random_key());
             let url = storage
                 .upload(&key, &content_type, &data)
                 .await
@@ -268,6 +256,17 @@ async fn parse_card_multipart(
             "remove_video" => fields.remove_video = true,
             "remove_youtube" => fields.remove_youtube = true,
             "image" => fields.image_url = upload_media_field(state, field, "image").await?,
+            // Set once a search result has been imported (see
+            // cards::import_card_image) and carried into the form as a
+            // hidden field placed after the "image" file input, so this
+            // arm runs later and wins if the user somehow set both.
+            "image_url" => {
+                let raw = field.text().await.unwrap_or_default();
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    fields.image_url = Some(trimmed.to_string());
+                }
+            }
             "audio" => fields.audio_url = upload_media_field(state, field, "audio").await?,
             "video" => fields.video_url = upload_media_field(state, field, "video").await?,
             "youtube_url" => {
@@ -467,6 +466,7 @@ async fn main() {
         db_pool,
         email_sender: web::email::EmailSender::from_env(),
         storage: web::storage::Storage::from_env(),
+        image_search: web::image_search::ImageSearch::from_env(),
     };
 
     let app = Router::new()

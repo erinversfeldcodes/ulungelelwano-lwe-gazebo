@@ -20,8 +20,8 @@ jobs:
       # back empty downstream. Host and password individually aren't
       # URL-shaped and pass through fine — the full connection string is
       # reassembled inline wherever it's actually needed below.
-      db_host: ${{ steps.branch.outputs.db_host }}
-      db_password: ${{ steps.branch.outputs.password }}
+      db_host: ${{ steps.reset.outputs.host }}
+      db_password: ${{ steps.reset.outputs.password }}
     steps:
       - name: Create Neon branch (copy-on-write child of `staging`, never prod)
         id: branch
@@ -30,6 +30,23 @@ jobs:
           project_id: ${{ vars.NEON_STAGING_PROJECT_ID }}
           parent_branch: staging
           branch_name: preview/pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+      # create-branch-action is get-or-create, not reset: a branch left over
+      # from an earlier push to this same PR is reused as-is, accumulating
+      # whatever app/e2e-test activity that previous run wrote — which once
+      # silently ate the whole 4-user signup cap and broke every subsequent
+      # CI run for that PR. Resetting unconditionally right after keeps
+      # every push starting from a clean copy of `staging`, the same
+      # fresh-every-run guarantee the "E2E (local)" job already gets from
+      # its own brand-new Postgres container. A no-op on a branch that was
+      # *just* created, since it's already at parent state.
+      - name: Reset Neon branch to a fresh copy of `staging`
+        id: reset
+        uses: neondatabase/reset-branch-action@v1
+        with:
+          project_id: ${{ vars.NEON_STAGING_PROJECT_ID }}
+          branch: preview/pr-${{ github.event.number }}
+          parent: true
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
   deploy-preview:

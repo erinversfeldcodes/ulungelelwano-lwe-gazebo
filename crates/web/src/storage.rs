@@ -5,6 +5,22 @@
 
 use s3::{AddressingStyle, Auth, Client, Credentials};
 
+/// A random hex object key for storing a new upload — shared by every path
+/// that writes into the bucket (a direct file upload, an image imported
+/// from a search result), so there's one place naming the convention.
+#[must_use]
+pub fn random_key() -> String {
+    use rand::RngExt;
+    use std::fmt::Write as _;
+
+    let bytes: [u8; 16] = rand::rng().random();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").unwrap();
+    }
+    out
+}
+
 /// Uploaded-image storage: an S3-compatible bucket — Tigris in prod/preview
 /// (see fly.toml/flake.nix), Garage locally (see docker-compose.yml), so the
 /// whole stack stays Docker-emulatable the way the project was set up to be
