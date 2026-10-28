@@ -77,6 +77,15 @@ test("signing up with a too-short password shows an error, not a silent login", 
 // instead of out of an inbox follows the same precedent auth.setup.ts
 // used to use for magic-link tokens — this app has no test-only route for
 // it, and doesn't need one.
+//
+// The account this test creates is deleted again at the end (try/finally,
+// so a failed assertion or Playwright's CI retry still cleans up) — left
+// alone, it used to just sit there forever. That mattered more than it
+// looked like it would: sign_up enforces a real MAX_USERS = 4 cap, and a
+// PR's preview Neon branch is reused across every push rather than reset,
+// so a handful of past runs' orphaned accounts here were enough to
+// silently eat the entire cap and fail every subsequent signup in CI,
+// including unrelated specs.
 test("a full password reset lets you log in with the new password", async ({ page }) => {
   const email = `${uniqueWord("reset-flow")}@example.com`;
   const originalPassword = "the-original-password";
@@ -90,31 +99,54 @@ test("a full password reset lets you log in with the new password", async ({ pag
   await page.getByRole("button", { name: "Sign up" }).click();
   await expect(page).toHaveURL("/");
 
-  await page.goto("/forgot-password");
-  await page.getByLabel("Email").fill(email);
-  await page.getByRole("button", { name: "Send reset link" }).click();
-  await expect(
-    page.getByText("If an account with that email exists, we've sent a password reset link."),
-  ).toBeVisible();
+  try {
+    await page.goto("/forgot-password");
+    await page.getByLabel("Email").fill(email);
+    await page.getByRole("button", { name: "Send reset link" }).click();
+    await expect(
+      page.getByText("If an account with that email exists, we've sent a password reset link."),
+    ).toBeVisible();
 
-  const token = await fetchLatestResetToken(email);
-  await page.goto(`/reset-password?token=${token}`);
-  await page.getByLabel("New password", { exact: true }).fill(newPassword);
-  await page.getByLabel("Confirm new password").fill(newPassword);
-  await page.getByRole("button", { name: "Reset password" }).click();
-  await expect(page).toHaveURL("/login?reset=success");
+    const token = await fetchLatestResetToken(email);
+    await page.goto(`/reset-password?token=${token}`);
+    await page.getByLabel("New password", { exact: true }).fill(newPassword);
+    await page.getByLabel("Confirm new password").fill(newPassword);
+    await page.getByRole("button", { name: "Reset password" }).click();
+    await expect(page).toHaveURL("/login?reset=success");
 
-  // The old password no longer works…
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password", { exact: true }).fill(originalPassword);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByText("invalid email or password")).toBeVisible();
+    // The old password no longer works…
+    await page.getByLabel("Email").fill(email);
+    await page.getByLabel("Password", { exact: true }).fill(originalPassword);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await expect(page.getByText("invalid email or password")).toBeVisible();
 
-  // …but the new one does.
-  await page.getByLabel("Password", { exact: true }).fill(newPassword);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page).toHaveURL("/");
+    // …but the new one does.
+    await page.getByLabel("Password", { exact: true }).fill(newPassword);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await expect(page).toHaveURL("/");
+  } finally {
+    await deleteTestUser(email);
+  }
 });
+
+async function deleteTestUser(email: string): Promise<void> {
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    const lowered = email.toLowerCase();
+    await client.query(
+      "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE email = $1)",
+      [lowered],
+    );
+    await client.query(
+      "DELETE FROM password_reset_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
+      [lowered],
+    );
+    await client.query("DELETE FROM users WHERE email = $1", [lowered]);
+  } finally {
+    await client.end();
+  }
+}
 
 async function fetchLatestResetToken(email: string): Promise<string> {
   const client = new Client({ connectionString: process.env.DATABASE_URL });
