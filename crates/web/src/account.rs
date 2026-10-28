@@ -30,12 +30,66 @@ async fn require_user() -> Result<crate::auth::UserRow, ServerFnError> {
         .map_err(ServerFnError::new)
 }
 
+#[cfg(feature = "ssr")]
+async fn session_cookies() -> Result<tower_cookies::Cookies, ServerFnError> {
+    leptos_axum::extract::<tower_cookies::Cookies>()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
 #[server]
-pub async fn request_magic_link(email: String) -> Result<(), ServerFnError> {
+pub async fn sign_up(
+    email: String,
+    name: String,
+    password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if password != confirm_password {
+        return Err(ServerFnError::new("passwords do not match"));
+    }
+    let state = expect_context::<crate::state::AppState>();
+    let session_token = crate::auth::sign_up(&state.db_pool, &email, &name, &password)
+        .await
+        .map_err(ServerFnError::new)?;
+    session_cookies()
+        .await?
+        .add(crate::auth::build_session_cookie(session_token));
+    Ok(())
+}
+
+#[server]
+pub async fn log_in(email: String, password: String) -> Result<(), ServerFnError> {
+    let state = expect_context::<crate::state::AppState>();
+    let session_token = crate::auth::log_in(&state.db_pool, &email, &password)
+        .await
+        .map_err(ServerFnError::new)?;
+    session_cookies()
+        .await?
+        .add(crate::auth::build_session_cookie(session_token));
+    Ok(())
+}
+
+#[server]
+pub async fn request_password_reset(email: String) -> Result<(), ServerFnError> {
     let state = expect_context::<crate::state::AppState>();
     let base_url =
         std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-    crate::auth::request_magic_link(&state.db_pool, &state.email_sender, &base_url, &email)
+    crate::auth::request_password_reset(&state.db_pool, &state.email_sender, &base_url, &email)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+#[server]
+pub async fn confirm_password_reset(
+    token: String,
+    password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if password != confirm_password {
+        return Err(ServerFnError::new("passwords do not match"));
+    }
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::confirm_password_reset(&state.db_pool, &token, &password)
         .await
         .map_err(ServerFnError::new)
 }
@@ -49,6 +103,66 @@ pub async fn current_user_name() -> Result<Option<String>, ServerFnError> {
     Ok(crate::auth::current_user(&state.db_pool, &cookies)
         .await
         .map(|u| u.name))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub email: String,
+}
+
+#[server]
+pub async fn current_profile() -> Result<Profile, ServerFnError> {
+    let user = require_user().await?;
+    Ok(Profile {
+        name: user.name,
+        email: user.email,
+    })
+}
+
+#[server]
+pub async fn update_name(name: String) -> Result<(), ServerFnError> {
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::update_name(&state.db_pool, user.id, &name)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+#[server]
+pub async fn update_email(
+    current_password: String,
+    new_email: String,
+) -> Result<(), ServerFnError> {
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::update_email(&state.db_pool, user.id, &current_password, &new_email)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+/// Revokes every session for the account server-side (same as redeeming a
+/// password-reset token), so the cookie on this request is cleared too —
+/// otherwise the browser would keep sending a token that no longer
+/// resolves to anyone.
+#[server]
+pub async fn change_password(
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+) -> Result<(), ServerFnError> {
+    if new_password != confirm_password {
+        return Err(ServerFnError::new("passwords do not match"));
+    }
+    let user = require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    crate::auth::change_password(&state.db_pool, user.id, &current_password, &new_password)
+        .await
+        .map_err(ServerFnError::new)?;
+    session_cookies()
+        .await?
+        .remove(tower_cookies::Cookie::new(crate::auth::SESSION_COOKIE, ""));
+    Ok(())
 }
 
 #[server]
