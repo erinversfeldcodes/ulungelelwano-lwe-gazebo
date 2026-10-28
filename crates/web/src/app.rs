@@ -10,6 +10,8 @@ use crate::cards::{
 use crate::decks::{
     AddCardToDeck, CreateDeck, DeleteDeck, RemoveCardFromDeck, RenameDeck, list_decks,
 };
+use crate::media_recorder::RecordButton;
+use leptos::html;
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::{
@@ -195,6 +197,8 @@ fn CardListPage() -> impl IntoView {
 #[component]
 fn NewCardPage() -> impl IntoView {
     let auth = Resource::new(|| (), |()| current_user_name());
+    let audio_input: NodeRef<html::Input> = NodeRef::new();
+    let video_input: NodeRef<html::Input> = NodeRef::new();
 
     view! {
         <h1>"Add a card"</h1>
@@ -206,8 +210,16 @@ fn NewCardPage() -> impl IntoView {
                 view! {
                     <form method="post" action="/cards/new" enctype="multipart/form-data">
                         <label>"Image file" <input type="file" name="image" accept="image/*" /></label>
-                        <label>"Audio file" <input type="file" name="audio" accept="audio/*" /></label>
-                        <label>"Video file" <input type="file" name="video" accept="video/*" /></label>
+                        <label>
+                            "Audio file"
+                            <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
+                        </label>
+                        <RecordButton kind="audio" target_input=audio_input />
+                        <label>
+                            "Video file"
+                            <input type="file" name="video" accept="video/*" node_ref=video_input />
+                        </label>
+                        <RecordButton kind="video" target_input=video_input />
                         <label>"Target-language word/phrase" <input type="text" name="target_text" /></label>
                         <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
                         <label>
@@ -245,6 +257,8 @@ fn EditCardPage() -> impl IntoView {
     let delete = ServerAction::<DeleteCard>::new();
     let toggle_deck = ServerAction::<AddCardToDeck>::new();
     let untoggle_deck = ServerAction::<RemoveCardFromDeck>::new();
+    let audio_input: NodeRef<html::Input> = NodeRef::new();
+    let video_input: NodeRef<html::Input> = NodeRef::new();
 
     let navigate = use_navigate();
     Effect::new(move |_| {
@@ -294,20 +308,47 @@ fn EditCardPage() -> impl IntoView {
                         });
                         let edit_form = signed_in.then(|| {
                             let tags_value = detail.tags.join(", ");
+                            // Only offered when there's actually something
+                            // to remove — a brand-new card (NewCardPage)
+                            // has no "remove" checkboxes at all, since
+                            // nothing's attached yet to remove.
+                            let remove_image = detail.image_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_image" />
+                                    "Remove image"
+                                </label>
+                            });
+                            let remove_audio = detail.audio_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_audio" />
+                                    "Remove audio"
+                                </label>
+                            });
+                            let remove_video = detail.video_url.is_some().then(|| view! {
+                                <label>
+                                    <input type="checkbox" name="remove_video" />
+                                    "Remove video"
+                                </label>
+                            });
                             view! {
                                 <form method="post" action=action enctype="multipart/form-data">
                                     <label>
                                         "Replace image (optional)"
                                         <input type="file" name="image" accept="image/*" />
                                     </label>
+                                    {remove_image}
                                     <label>
                                         "Replace audio (optional)"
-                                        <input type="file" name="audio" accept="audio/*" />
+                                        <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
                                     </label>
+                                    <RecordButton kind="audio" target_input=audio_input />
+                                    {remove_audio}
                                     <label>
                                         "Replace video (optional)"
-                                        <input type="file" name="video" accept="video/*" />
+                                        <input type="file" name="video" accept="video/*" node_ref=video_input />
                                     </label>
+                                    <RecordButton kind="video" target_input=video_input />
+                                    {remove_video}
                                     <label>
                                         "Target-language word/phrase"
                                         <input type="text" name="target_text" value=detail.target_text.clone() />

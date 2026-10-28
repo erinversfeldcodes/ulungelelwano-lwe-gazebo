@@ -187,12 +187,20 @@ struct CardFormFields {
     image_url: Option<String>,
     audio_url: Option<String>,
     video_url: Option<String>,
+    // Only meaningful on the edit form, which is the only one that ever
+    // renders these checkboxes (there's nothing to remove from a brand
+    // new card) — a new upload for the same field always wins over a
+    // remove request, since submitting both at once only makes sense as
+    // "replace", not "replace, then immediately delete what I just set".
+    remove_image: bool,
+    remove_audio: bool,
+    remove_video: bool,
 }
 
 /// Pulls every field out of a card create/edit form submission: text
-/// fields, the two_way checkbox, and whichever of image/audio/video were
+/// fields, the two_way checkbox, whichever of image/audio/video were
 /// attached (each independent and optional — a card can have any
-/// combination, including none).
+/// combination, including none), and the edit form's "remove" checkboxes.
 #[cfg(feature = "ssr")]
 async fn parse_card_multipart(
     state: &AppState,
@@ -205,6 +213,9 @@ async fn parse_card_multipart(
         image_url: None,
         audio_url: None,
         video_url: None,
+        remove_image: false,
+        remove_audio: false,
+        remove_video: false,
     };
 
     while let Some(field) = multipart
@@ -219,6 +230,9 @@ async fn parse_card_multipart(
             // A checkbox only appears in the multipart body at all when
             // checked, so this field's mere presence means true.
             "two_way" => fields.two_way = true,
+            "remove_image" => fields.remove_image = true,
+            "remove_audio" => fields.remove_audio = true,
+            "remove_video" => fields.remove_video = true,
             "image" => fields.image_url = upload_media_field(state, field, "image").await?,
             "audio" => fields.audio_url = upload_media_field(state, field, "audio").await?,
             "video" => fields.video_url = upload_media_field(state, field, "video").await?,
@@ -297,15 +311,30 @@ async fn cards_update(
         ))?;
 
     let fields = parse_card_multipart(&state, &mut multipart).await?;
-    let image_url = fields
-        .image_url
-        .unwrap_or_else(|| existing.image_url.unwrap_or_default());
-    let audio_url = fields
-        .audio_url
-        .unwrap_or_else(|| existing.audio_url.unwrap_or_default());
-    let video_url = fields
-        .video_url
-        .unwrap_or_else(|| existing.video_url.unwrap_or_default());
+    // A new upload wins over a remove request (see CardFormFields); a
+    // remove request wins over keeping the existing value; otherwise the
+    // existing value is kept as-is.
+    let image_url = fields.image_url.unwrap_or_else(|| {
+        if fields.remove_image {
+            String::new()
+        } else {
+            existing.image_url.unwrap_or_default()
+        }
+    });
+    let audio_url = fields.audio_url.unwrap_or_else(|| {
+        if fields.remove_audio {
+            String::new()
+        } else {
+            existing.audio_url.unwrap_or_default()
+        }
+    });
+    let video_url = fields.video_url.unwrap_or_else(|| {
+        if fields.remove_video {
+            String::new()
+        } else {
+            existing.video_url.unwrap_or_default()
+        }
+    });
 
     web::db::update_card(
         &state.db_pool,

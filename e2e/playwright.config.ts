@@ -17,7 +17,25 @@ export default defineConfig({
     },
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"], storageState: ".auth/user.json" },
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: ".auth/user.json",
+        // Lets media-cards.spec.ts actually exercise RecordButton's
+        // getUserMedia/MediaRecorder path end to end: --use-fake-ui-for-
+        // media-stream auto-accepts the permission prompt instead of
+        // blocking on it, and --use-fake-device-for-media-stream supplies
+        // a synthetic video pattern + audio tone in place of a real
+        // mic/camera, so MediaRecorder gets genuine (if synthetic) data
+        // to work with. `permissions` is Playwright's own belt-and-
+        // suspenders grant for the same two devices.
+        permissions: ["camera", "microphone"],
+        launchOptions: {
+          args: [
+            "--use-fake-ui-for-media-stream",
+            "--use-fake-device-for-media-stream",
+          ],
+        },
+      },
       dependencies: ["setup"],
     },
   ],
