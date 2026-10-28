@@ -13,21 +13,23 @@ export function uniqueWord(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// Leptos hydrates client-side only after the WASM bundle finishes loading
-// and compiling — a step the browser's own 'load' event (what page.goto
-// awaits by default) does not wait for. Interacting with a server-action
-// form before hydration completes falls through to a plain native HTML
-// submission instead of a fetch; observed directly in a CI trace as a 302
-// response followed by a full page reload, which discards all client-side
-// state, including whatever the action's result would have rendered.
-// Only matters on a cold cache (nothing fetched yet in this browser
-// context), which is exactly what auth.setup.ts's "setup" project always
-// is — the one place this has actually been seen to race.
+// Leptos hydrates client-side only once hydrate_body (lib.rs) actually
+// returns — well after the WASM bundle's own network fetch resolves, since
+// the browser still has to compile and instantiate it first. Interacting
+// with a server-action form before hydration completes falls through to a
+// plain native HTML submission instead of a fetch; observed directly in a
+// CI trace as a 302 response followed by a full page reload, which
+// discards all client-side state, including whatever the action's result
+// would have rendered. (An earlier version of this helper waited on the
+// WASM fetch itself — confirmed by trace to still race: the form submit
+// landed under 200ms after that fetch resolved, well short of hydration
+// actually finishing.) `data-hydrated` is set by hydrate() for exactly
+// this reason. Only matters on a cold cache (nothing fetched yet in this
+// browser context), which is exactly what auth.setup.ts's "setup" project
+// always is — the one place this has actually been seen to race.
 export async function gotoAndWaitForHydration(page: Page, path: string): Promise<void> {
-  await Promise.all([
-    page.waitForResponse((res) => res.url().endsWith("/pkg/web.wasm") && res.ok()),
-    page.goto(path),
-  ]);
+  await page.goto(path);
+  await page.locator('body[data-hydrated="true"]').waitFor();
 }
 
 // A Leptos server action's fetch is dispatched asynchronously from its

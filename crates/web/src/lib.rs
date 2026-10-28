@@ -17,4 +17,15 @@ pub mod storage;
 pub fn hydrate() {
     console_error_panic_hook::set_once();
     leptos::mount::hydrate_body(app::App);
+
+    // Hydration — and so the client-side handlers server-action forms
+    // depend on — isn't actually done until this point. The WASM bundle's
+    // own network fetch completing is not a usable proxy for that: e2e
+    // traces show a server-action form submit still landing as a plain
+    // (unhydrated) native POST under 200ms after that fetch resolves,
+    // well short of hydrate_body returning. This attribute is the only
+    // reliable signal, so e2e tests wait on it instead.
+    if let Some(body) = leptos::prelude::document().body() {
+        let _ = body.set_attribute("data-hydrated", "true");
+    }
 }
