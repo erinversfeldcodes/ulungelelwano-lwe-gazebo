@@ -135,19 +135,77 @@ fn random_key() -> String {
     out
 }
 
-/// Pulls `target_text`/`tags` fields and an optional `image` file out of a
-/// card create/edit form submission. Uploading is best-effort: with no
-/// storage configured (e.g. local dev without the S3_* env vars set), an
-/// attached image is silently skipped rather than failing the whole
-/// submission — the pasted-URL path still works either way.
+/// Uploads one `image`/`audio`/`video` multipart field to storage.
+/// Best-effort, same as before this was extracted: with no storage
+/// configured (e.g. local dev without the S3_* env vars set), an attached
+/// file is silently skipped rather than failing the whole submission —
+/// the pasted-URL path (image only) still works either way.
+#[cfg(feature = "ssr")]
+async fn upload_media_field(
+    state: &AppState,
+    field: axum::extract::multipart::Field<'_>,
+    kind: &str,
+) -> Result<Option<String>, (axum::http::StatusCode, String)> {
+    let content_type = field.content_type().map(str::to_string);
+    let data = field
+        .bytes()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+    if data.is_empty() {
+        return Ok(None);
+    }
+    match (&state.storage, content_type) {
+        (Some(storage), Some(content_type)) => {
+            let key = format!("cards/{}", random_key());
+            let url = storage
+                .upload(&key, &content_type, &data)
+                .await
+                .map_err(|e| {
+                    log::error!("card {kind} upload failed: {e}");
+                    (axum::http::StatusCode::BAD_GATEWAY, e)
+                })?;
+            Ok(Some(url))
+        }
+        (None, _) => {
+            log::warn!(
+                "card {kind} upload attached but no storage is configured — dropping it silently"
+            );
+            Ok(None)
+        }
+        (Some(_), None) => {
+            log::warn!("card {kind} upload attached with no content-type — dropping it");
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+struct CardFormFields {
+    target_text: String,
+    tags_raw: String,
+    two_way: bool,
+    image_url: Option<String>,
+    audio_url: Option<String>,
+    video_url: Option<String>,
+}
+
+/// Pulls every field out of a card create/edit form submission: text
+/// fields, the two_way checkbox, and whichever of image/audio/video were
+/// attached (each independent and optional — a card can have any
+/// combination, including none).
 #[cfg(feature = "ssr")]
 async fn parse_card_multipart(
     state: &AppState,
     multipart: &mut axum::extract::Multipart,
-) -> Result<(String, String, Option<String>), (axum::http::StatusCode, String)> {
-    let mut target_text = String::new();
-    let mut tags_raw = String::new();
-    let mut uploaded_url: Option<String> = None;
+) -> Result<CardFormFields, (axum::http::StatusCode, String)> {
+    let mut fields = CardFormFields {
+        target_text: String::new(),
+        tags_raw: String::new(),
+        two_way: false,
+        image_url: None,
+        audio_url: None,
+        video_url: None,
+    };
 
     while let Some(field) = multipart
         .next_field()
@@ -156,46 +214,19 @@ async fn parse_card_multipart(
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
-            "target_text" => target_text = field.text().await.unwrap_or_default(),
-            "tags" => tags_raw = field.text().await.unwrap_or_default(),
-            "image" => {
-                let content_type = field.content_type().map(str::to_string);
-                let data = field
-                    .bytes()
-                    .await
-                    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
-                if !data.is_empty() {
-                    match (&state.storage, content_type) {
-                        (Some(storage), Some(content_type)) => {
-                            let key = format!("cards/{}", random_key());
-                            let url =
-                                storage
-                                    .upload(&key, &content_type, &data)
-                                    .await
-                                    .map_err(|e| {
-                                        log::error!("card image upload failed: {e}");
-                                        (axum::http::StatusCode::BAD_GATEWAY, e)
-                                    })?;
-                            uploaded_url = Some(url);
-                        }
-                        (None, _) => {
-                            log::warn!(
-                                "card image upload attached but no storage is configured — dropping it silently"
-                            );
-                        }
-                        (Some(_), None) => {
-                            log::warn!(
-                                "card image upload attached with no content-type — dropping it"
-                            );
-                        }
-                    }
-                }
-            }
+            "target_text" => fields.target_text = field.text().await.unwrap_or_default(),
+            "tags" => fields.tags_raw = field.text().await.unwrap_or_default(),
+            // A checkbox only appears in the multipart body at all when
+            // checked, so this field's mere presence means true.
+            "two_way" => fields.two_way = true,
+            "image" => fields.image_url = upload_media_field(state, field, "image").await?,
+            "audio" => fields.audio_url = upload_media_field(state, field, "audio").await?,
+            "video" => fields.video_url = upload_media_field(state, field, "video").await?,
             _ => {}
         }
     }
 
-    Ok((target_text, tags_raw, uploaded_url))
+    Ok(fields)
 }
 
 #[cfg(feature = "ssr")]
@@ -223,14 +254,19 @@ async fn cards_new(
             "not signed in".to_string(),
         ))?;
 
-    let (target_text, tags_raw, image_url) = parse_card_multipart(&state, &mut multipart).await?;
+    let fields = parse_card_multipart(&state, &mut multipart).await?;
 
     web::db::create_card(
         &state.db_pool,
         user.id,
-        image_url.as_deref().unwrap_or(""),
-        &target_text,
-        &parse_tags(&tags_raw),
+        web::db::NewCard {
+            image_url: fields.image_url.as_deref().unwrap_or(""),
+            audio_url: fields.audio_url.as_deref().unwrap_or(""),
+            video_url: fields.video_url.as_deref().unwrap_or(""),
+            target_text: &fields.target_text,
+            two_way: fields.two_way,
+        },
+        &parse_tags(&fields.tags_raw),
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -260,22 +296,42 @@ async fn cards_update(
             "card not found".to_string(),
         ))?;
 
-    let (target_text, tags_raw, uploaded_url) =
-        parse_card_multipart(&state, &mut multipart).await?;
-    let image_url = uploaded_url.unwrap_or_else(|| existing.image_url.unwrap_or_default());
+    let fields = parse_card_multipart(&state, &mut multipart).await?;
+    let image_url = fields
+        .image_url
+        .unwrap_or_else(|| existing.image_url.unwrap_or_default());
+    let audio_url = fields
+        .audio_url
+        .unwrap_or_else(|| existing.audio_url.unwrap_or_default());
+    let video_url = fields
+        .video_url
+        .unwrap_or_else(|| existing.video_url.unwrap_or_default());
 
     web::db::update_card(
         &state.db_pool,
         card_id,
-        &image_url,
-        &target_text,
-        &parse_tags(&tags_raw),
+        web::db::NewCard {
+            image_url: &image_url,
+            audio_url: &audio_url,
+            video_url: &video_url,
+            target_text: &fields.target_text,
+            two_way: fields.two_way,
+        },
+        &parse_tags(&fields.tags_raw),
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(axum::response::Redirect::to(&format!("/cards/{card_id}")))
 }
+
+/// Axum's default multipart body limit (2MB) comfortably fits an image
+/// but not a voice clip or a short video, so card uploads need a higher
+/// ceiling. Applied to the whole router rather than scoped to just the
+/// card routes — every other route's payloads are tiny text/JSON, so a
+/// generous shared ceiling costs nothing there.
+#[cfg(feature = "ssr")]
+const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 #[cfg(feature = "ssr")]
 async fn auth_logout(
@@ -345,6 +401,7 @@ async fn main() {
         .route("/cards/{id}", axum::routing::post(cards_update))
         .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell))
         .layer(tower_cookies::CookieManagerLayer::new())
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

@@ -4,7 +4,8 @@
 
 use crate::account::{RequestMagicLink, SetDailyNewCardLimit, current_user_name, user_stats};
 use crate::cards::{
-    DeleteCard, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags, review_queue,
+    DeleteCard, DirectionInput, GradeCard, GradeInput, ReviewOrderInput, get_card, list_tags,
+    review_queue,
 };
 use crate::decks::{
     AddCardToDeck, CreateDeck, DeleteDeck, RemoveCardFromDeck, RenameDeck, list_decks,
@@ -168,6 +169,12 @@ fn CardListPage() -> impl IntoView {
                                             {card
                                                 .image_url
                                                 .map(|url| view! { <img src=url alt="" /> })}
+                                            {card
+                                                .audio_url
+                                                .map(|url| view! { <audio controls src=url></audio> })}
+                                            {card
+                                                .video_url
+                                                .map(|url| view! { <video controls src=url></video> })}
                                             <span>{card.target_text}</span>
                                             " "
                                             <A href=edit_href>"Edit"</A>
@@ -199,8 +206,14 @@ fn NewCardPage() -> impl IntoView {
                 view! {
                     <form method="post" action="/cards/new" enctype="multipart/form-data">
                         <label>"Image file" <input type="file" name="image" accept="image/*" /></label>
+                        <label>"Audio file" <input type="file" name="audio" accept="audio/*" /></label>
+                        <label>"Video file" <input type="file" name="video" accept="video/*" /></label>
                         <label>"Target-language word/phrase" <input type="text" name="target_text" /></label>
                         <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
+                        <label>
+                            <input type="checkbox" name="two_way" />
+                            "Two-way: also review back → front, scheduled independently"
+                        </label>
                         <button type="submit">"Add"</button>
                     </form>
                 }
@@ -257,6 +270,14 @@ fn EditCardPage() -> impl IntoView {
                             .image_url
                             .clone()
                             .map(|url| view! { <img src=url alt="" /> });
+                        let audio_view = detail
+                            .audio_url
+                            .clone()
+                            .map(|url| view! { <audio controls src=url></audio> });
+                        let video_view = detail
+                            .video_url
+                            .clone()
+                            .map(|url| view! { <video controls src=url></video> });
                         let deck_ids = detail.deck_ids.clone();
 
                         // Anyone can view a card; only a signed-in user sees
@@ -280,10 +301,22 @@ fn EditCardPage() -> impl IntoView {
                                         <input type="file" name="image" accept="image/*" />
                                     </label>
                                     <label>
+                                        "Replace audio (optional)"
+                                        <input type="file" name="audio" accept="audio/*" />
+                                    </label>
+                                    <label>
+                                        "Replace video (optional)"
+                                        <input type="file" name="video" accept="video/*" />
+                                    </label>
+                                    <label>
                                         "Target-language word/phrase"
                                         <input type="text" name="target_text" value=detail.target_text.clone() />
                                     </label>
                                     <label>"Tags (comma separated)" <input type="text" name="tags" value=tags_value /></label>
+                                    <label>
+                                        <input type="checkbox" name="two_way" checked=detail.two_way />
+                                        "Two-way: also review back → front, scheduled independently"
+                                    </label>
                                     <button type="submit">"Save"</button>
                                 </form>
                             }
@@ -355,6 +388,8 @@ fn EditCardPage() -> impl IntoView {
                         view! {
                             <div class="review-card">
                                 {image_view}
+                                {audio_view}
+                                {video_view}
                                 {read_only_info}
                             </div>
                             {edit_form}
@@ -512,28 +547,52 @@ fn ReviewPage() -> impl IntoView {
                             None => view! { {counts} <p>"Nothing due. Nice."</p> }.into_any(),
                             Some(card) => {
                                 let card_id = card.id;
-                                view! {
-                                    {counts}
-                                    <div class="review-card">
-                                        {card
-                                            .image_url
-                                            .map(|url| view! { <img src=url alt="" /> })}
+                                let direction = card.direction;
+                                let media_view = view! {
+                                    {card.image_url.map(|url| view! { <img src=url alt="" /> })}
+                                    {card.audio_url.map(|url| view! { <audio controls src=url></audio> })}
+                                    {card.video_url.map(|url| view! { <video controls src=url></video> })}
+                                }
+                                .into_any();
+                                // Forward: media is the prompt, target_text the
+                                // answer. Reverse (two-way cards only): the same
+                                // card, but target_text is the prompt and media
+                                // is the answer — this slot is independently
+                                // scheduled from the forward one.
+                                let prompt_and_answer = match direction {
+                                    DirectionInput::Forward => view! {
+                                        {media_view}
                                         <details>
                                             <summary>"Reveal"</summary>
                                             <p>{card.target_text}</p>
                                         </details>
+                                    }
+                                    .into_any(),
+                                    DirectionInput::Reverse => view! {
+                                        <p>{card.target_text}</p>
+                                        <details>
+                                            <summary>"Reveal"</summary>
+                                            {media_view}
+                                        </details>
+                                    }
+                                    .into_any(),
+                                };
+                                view! {
+                                    {counts}
+                                    <div class="review-card">
+                                        {prompt_and_answer}
                                         <div class="review-grades">
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Again });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Again, direction });
                                             }>"Again"</button>
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Hard });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Hard, direction });
                                             }>"Hard"</button>
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Good });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Good, direction });
                                             }>"Good"</button>
                                             <button on:click=move |_| {
-                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Easy });
+                                                grade.dispatch(GradeCard { card_id, grade: GradeInput::Easy, direction });
                                             }>"Easy"</button>
                                         </div>
                                     </div>

@@ -6,21 +6,66 @@ use uuid::Uuid;
 pub struct Card {
     pub id: Uuid,
     pub image_url: Option<String>,
+    pub audio_url: Option<String>,
+    pub video_url: Option<String>,
     pub target_text: String,
+    pub two_way: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardDetail {
     pub id: Uuid,
     pub image_url: Option<String>,
+    pub audio_url: Option<String>,
+    pub video_url: Option<String>,
     pub target_text: String,
+    pub two_way: bool,
     pub tags: Vec<String>,
     pub deck_ids: Vec<Uuid>,
 }
 
+/// Which side of a review-queue card is the prompt. See
+/// `crate::db::Direction` for why this is a queue-slot property, not a
+/// card property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DirectionInput {
+    Forward,
+    Reverse,
+}
+
+#[cfg(feature = "ssr")]
+impl From<crate::db::Direction> for DirectionInput {
+    fn from(direction: crate::db::Direction) -> Self {
+        match direction {
+            crate::db::Direction::Forward => DirectionInput::Forward,
+            crate::db::Direction::Reverse => DirectionInput::Reverse,
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+impl From<DirectionInput> for crate::db::Direction {
+    fn from(direction: DirectionInput) -> Self {
+        match direction {
+            DirectionInput::Forward => crate::db::Direction::Forward,
+            DirectionInput::Reverse => crate::db::Direction::Reverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewCard {
+    pub id: Uuid,
+    pub image_url: Option<String>,
+    pub audio_url: Option<String>,
+    pub video_url: Option<String>,
+    pub target_text: String,
+    pub direction: DirectionInput,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewQueueView {
-    pub cards: Vec<Card>,
+    pub cards: Vec<ReviewCard>,
     pub due_review_count: i64,
     pub new_available_today: i64,
 }
@@ -89,7 +134,10 @@ pub async fn list_cards(
         .map(|r| Card {
             id: r.id,
             image_url: r.image_url,
+            audio_url: r.audio_url,
+            video_url: r.video_url,
             target_text: r.target_text,
+            two_way: r.two_way,
         })
         .collect())
 }
@@ -120,7 +168,10 @@ pub async fn get_card(card_id: Uuid) -> Result<Option<CardDetail>, ServerFnError
     Ok(Some(CardDetail {
         id: card.id,
         image_url: card.image_url,
+        audio_url: card.audio_url,
+        video_url: card.video_url,
         target_text: card.target_text,
+        two_way: card.two_way,
         tags,
         deck_ids,
     }))
@@ -150,10 +201,13 @@ pub async fn review_queue(
         cards: queue
             .cards
             .into_iter()
-            .map(|r| Card {
+            .map(|r| ReviewCard {
                 id: r.id,
                 image_url: r.image_url,
+                audio_url: r.audio_url,
+                video_url: r.video_url,
                 target_text: r.target_text,
+                direction: r.direction.into(),
             })
             .collect(),
         due_review_count: queue.due_review_count,
@@ -162,11 +216,21 @@ pub async fn review_queue(
 }
 
 #[server]
-pub async fn grade_card(card_id: Uuid, grade: GradeInput) -> Result<(), ServerFnError> {
+pub async fn grade_card(
+    card_id: Uuid,
+    grade: GradeInput,
+    direction: DirectionInput,
+) -> Result<(), ServerFnError> {
     let user = require_user().await?;
     let state = expect_context::<crate::state::AppState>();
-    crate::db::record_review(&state.db_pool, user.id, card_id, grade.into())
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    crate::db::record_review(
+        &state.db_pool,
+        user.id,
+        card_id,
+        grade.into(),
+        direction.into(),
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(())
 }
