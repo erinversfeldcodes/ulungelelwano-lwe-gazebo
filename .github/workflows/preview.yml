@@ -14,14 +14,21 @@ jobs:
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     outputs:
-      db_url: ${{ steps.branch.outputs.db_url }}
+      # Not the action's `db_url` output: GitHub's runner silently drops any
+      # step/job output shaped like a credentialed URL ("Skip output 'db_url'
+      # since it may contain secret" in the logs), so `db_url` always comes
+      # back empty downstream. Host and password individually aren't
+      # URL-shaped and pass through fine — the full connection string is
+      # reassembled inline wherever it's actually needed below.
+      db_host: ${{ steps.branch.outputs.db_host }}
+      db_password: ${{ steps.branch.outputs.password }}
     steps:
       - name: Create Neon branch (copy-on-write child of `staging`, never prod)
         id: branch
-        uses: neondatabase/create-branch-action@v6
+        uses: neondatabase/create-branch-action@v6.4.0
         with:
           project_id: ${{ vars.NEON_STAGING_PROJECT_ID }}
-          parent: staging
+          parent_branch: staging
           branch_name: preview/pr-${{ github.event.number }}
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
@@ -77,7 +84,7 @@ jobs:
         with:
           name: gazebo-pr-${{ github.event.number }}
           secrets: >
-            DATABASE_URL=${{ needs.neon-branch.outputs.db_url }}
+            DATABASE_URL=postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
             RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
             TEST_EMAIL_RECIPIENT=${{ vars.TEST_EMAIL_RECIPIENT }}
             APP_BASE_URL=https://gazebo-pr-${{ github.event.number }}.fly.dev
@@ -127,7 +134,7 @@ jobs:
       # The preview's own Neon branch — auth.setup.ts reads the magic-link
       # token directly from it (same trick it uses against local Postgres),
       # bypassing the need to actually receive an email.
-      DATABASE_URL: ${{ needs.neon-branch.outputs.db_url }}
+      DATABASE_URL: postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
