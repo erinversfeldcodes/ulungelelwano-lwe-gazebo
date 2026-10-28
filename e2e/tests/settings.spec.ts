@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { withServerResponse } from "./helpers";
 
 // Deliberately saves a large limit, not a small one: the daily new-card cap
 // is global per-user, and other specs run concurrently against the same
@@ -11,7 +12,9 @@ test("daily new card limit setting persists across a reload", async ({ page }) =
   const input = page.getByLabel("New cards per day (blank = unlimited)");
 
   await input.fill("9999");
-  await page.getByRole("button", { name: "Save" }).click();
+  await withServerResponse(page, "set_daily_new_card_limit", () =>
+    page.getByRole("button", { name: "Save" }).click(),
+  );
   await expect(input).toHaveValue("9999");
 
   await page.reload();
@@ -22,6 +25,8 @@ test("daily new card limit setting persists across a reload", async ({ page }) =
   // the same shared per-user review queue, and 20 would starve them of new
   // cards for the remainder of the run.
   await input.fill("");
-  await page.getByRole("button", { name: "Save" }).click();
+  await withServerResponse(page, "set_daily_new_card_limit", () =>
+    page.getByRole("button", { name: "Save" }).click(),
+  );
   await expect(input).toHaveValue("");
 });

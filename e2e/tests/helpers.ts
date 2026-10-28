@@ -13,6 +13,30 @@ export function uniqueWord(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+// A Leptos server action's fetch is dispatched asynchronously from its
+// triggering DOM event (a checkbox's on:change, a form's submit), so the
+// checkbox/input's own post-click state is just the browser's optimistic
+// local echo — not confirmation the server received or committed anything.
+// `waitForLoadState("networkidle")` is not a reliable stand-in for that
+// confirmation either: if the fetch hasn't actually been dispatched yet
+// when the idle check runs, it reports idle immediately. A real page
+// navigation right after (page.goto, page.reload) then cancels that
+// still-in-flight request outright — observed directly in CI traces as
+// the request landing with status -1. Registering the expected response
+// before triggering the action, and awaiting both together, closes that
+// window for good instead of hoping a heuristic wait covers it.
+export async function withServerResponse<T>(
+  page: Page,
+  fnName: string,
+  trigger: () => Promise<T>,
+): Promise<T> {
+  const [, result] = await Promise.all([
+    page.waitForResponse((res) => res.url().includes(`/api/${fnName}`) && res.ok()),
+    trigger(),
+  ]);
+  return result;
+}
+
 // Creates a card and a deck containing only that card. Scoping a spec's
 // review to its own deck (rather than the shared pool's review queue) is
 // what makes it safe under parallel execution: specs running concurrently
@@ -36,12 +60,8 @@ export async function createCardInOwnDeck(
   await expect(page).toHaveURL("/");
 
   await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
-  await page.getByLabel(deckName).check();
+  await withServerResponse(page, "add_card_to_deck", () => page.getByLabel(deckName).check());
   await expect(page.getByLabel(deckName)).toBeChecked();
-  // The checkbox's own DOM state updates synchronously on click, but the
-  // AddCardToDeck server action it dispatches is async — wait for that
-  // round trip before callers rely on the card actually being in the deck.
-  await page.waitForLoadState("networkidle");
 
   return { word, deckName };
 }
