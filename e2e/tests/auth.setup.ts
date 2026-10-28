@@ -1,7 +1,7 @@
 import { test as setup, expect } from "@playwright/test";
 import { Client } from "pg";
 import * as fs from "fs";
-import { RESEND_ALLOWED_EMAIL } from "./helpers";
+import { RESEND_ALLOWED_EMAIL, gotoAndWaitForHydration } from "./helpers";
 
 const TEST_EMAIL = RESEND_ALLOWED_EMAIL;
 
@@ -13,7 +13,9 @@ const TEST_EMAIL = RESEND_ALLOWED_EMAIL;
 // reading the token directly is simpler and keeps test-only logic out of
 // production code entirely.
 setup("authenticate", async ({ page }) => {
-  await page.goto("/login");
+  // This is the very first page load of the whole run, in a brand-new
+  // browser context with nothing cached yet — see gotoAndWaitForHydration.
+  await gotoAndWaitForHydration(page, "/login");
   await page.getByLabel("Email").fill(TEST_EMAIL);
   await page.getByRole("button", { name: "Send magic link" }).click();
   await expect(page.getByText("Check your email for a sign-in link.")).toBeVisible();

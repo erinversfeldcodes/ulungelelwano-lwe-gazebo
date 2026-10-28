@@ -13,6 +13,23 @@ export function uniqueWord(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+// Leptos hydrates client-side only after the WASM bundle finishes loading
+// and compiling — a step the browser's own 'load' event (what page.goto
+// awaits by default) does not wait for. Interacting with a server-action
+// form before hydration completes falls through to a plain native HTML
+// submission instead of a fetch; observed directly in a CI trace as a 302
+// response followed by a full page reload, which discards all client-side
+// state, including whatever the action's result would have rendered.
+// Only matters on a cold cache (nothing fetched yet in this browser
+// context), which is exactly what auth.setup.ts's "setup" project always
+// is — the one place this has actually been seen to race.
+export async function gotoAndWaitForHydration(page: Page, path: string): Promise<void> {
+  await Promise.all([
+    page.waitForResponse((res) => res.url().endsWith("/pkg/web.wasm") && res.ok()),
+    page.goto(path),
+  ]);
+}
+
 // A Leptos server action's fetch is dispatched asynchronously from its
 // triggering DOM event (a checkbox's on:change, a form's submit), so the
 // checkbox/input's own post-click state is just the browser's optimistic
