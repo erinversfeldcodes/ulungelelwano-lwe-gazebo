@@ -220,8 +220,8 @@ pub fn DictionaryDetailsEditor(
     let linked_words: NodeRef<html::Input> = NodeRef::new();
 
     view! {
-        <details class="dictionary-details">
-            <summary>"Dictionary details (optional)"</summary>
+        <div class="card-section">
+            <p class="card-section-heading">"Dictionary details (optional)"</p>
             <label>
                 "Part of speech"
                 <input type="text" node_ref=part_of_speech value=part_of_speech_initial />
@@ -264,6 +264,6 @@ pub fn DictionaryDetailsEditor(
                     Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
                 })
             }}
-        </details>
+        </div>
     }
 }

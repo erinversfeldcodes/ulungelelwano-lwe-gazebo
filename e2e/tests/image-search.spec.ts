@@ -48,7 +48,9 @@ test("a card saved without using image search carries no trace of the English te
   await page.getByRole("button", { name: "Add" }).click();
   await expect(page).toHaveURL("/");
 
-  await expect(page.getByText(word, { exact: true })).toBeVisible();
+  // The word is behind the card's "Reveal" control now (see app.rs's
+  // CardListPage) — hasText checks textContent, not visibility.
+  await expect(page.locator("li", { hasText: word })).toHaveCount(1);
   await expect(page.getByText(marker, { exact: true })).not.toBeVisible();
 });
 

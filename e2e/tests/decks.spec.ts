@@ -21,7 +21,9 @@ test("creating a deck and assigning a card to it scopes the card list filter", a
 
   await page.goto("/");
   await page.getByLabel("Filter by deck").selectOption(deckName);
-  await expect(page.getByText(word)).toBeVisible();
+  // The word is behind each card's "Reveal" control now (see app.rs's
+  // CardListPage) — hasText checks textContent, not visibility.
+  await expect(page.locator("li", { hasText: word })).toHaveCount(1);
 });
 
 test("removing a card from a deck excludes it from that deck's filter again", async ({ page }) => {
@@ -46,7 +48,7 @@ test("removing a card from a deck excludes it from that deck's filter again", as
 
   await page.goto("/");
   await page.getByLabel("Filter by deck").selectOption(deckName);
-  await expect(page.getByText(word)).not.toBeVisible();
+  await expect(page.locator("li", { hasText: word })).toHaveCount(0);
 });
 
 test("a newly created card automatically lands in the Default deck", async ({ page }) => {
@@ -58,7 +60,7 @@ test("a newly created card automatically lands in the Default deck", async ({ pa
   await expect(page).toHaveURL("/");
 
   await page.getByLabel("Filter by deck").selectOption("Default");
-  await expect(page.getByText(word)).toBeVisible();
+  await expect(page.locator("li", { hasText: word })).toHaveCount(1);
 });
 
 test("renaming a deck updates its name", async ({ page }) => {
@@ -86,7 +88,11 @@ test("deleting a deck removes it from the list", async ({ page }) => {
   await page.getByRole("button", { name: "Create" }).click();
   await expect(page.getByRole("link", { name: deckName })).toBeVisible();
 
-  await page.locator("li", { hasText: deckName }).getByRole("button", { name: "Delete" }).click();
+  // Delete requires an arming click before the confirming one — see
+  // app.rs's confirm_button.
+  const row = page.locator("li", { hasText: deckName });
+  await row.getByRole("button", { name: "Delete" }).click();
+  await row.getByRole("button", { name: "Confirm delete?" }).click();
 
   await expect(page.getByRole("link", { name: deckName })).not.toBeVisible();
 });

@@ -12,7 +12,8 @@ async function saveDictionaryDetails(
 ): Promise<void> {
   await page.goto("/");
   await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
-  await page.getByText("Dictionary details (optional)").click();
+  // Dictionary details is an always-visible section now, not a disclosure
+  // to expand first.
   if (details.partOfSpeech) {
     await page.getByLabel("Part of speech").fill(details.partOfSpeech);
   }

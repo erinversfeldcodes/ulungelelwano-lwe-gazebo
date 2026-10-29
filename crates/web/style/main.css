@@ -71,11 +71,19 @@ nav a {
     color: var(--paper);
     text-decoration: none;
     font-weight: bold;
+    border-bottom: 2px solid transparent;
+    padding-bottom: 2px;
 }
 
 nav a:hover {
     color: var(--brass-bright);
     text-decoration: underline;
+}
+
+/* Set automatically by <A> on whichever link matches the current route. */
+nav a[aria-current="page"] {
+    color: var(--brass-bright);
+    border-bottom-color: var(--brass-bright);
 }
 
 main {
@@ -102,6 +110,13 @@ p, label, .word-display {
     color: var(--paper-aged);
 }
 
+.page-intro {
+    font-style: italic;
+    opacity: 0.85;
+    margin-top: -0.4rem;
+    margin-bottom: 1.2rem;
+}
+
 /* --- Forms: filling out a card by hand, on a paper surface --- */
 
 form {
@@ -113,7 +128,8 @@ form {
     max-width: 32rem;
 }
 
-form label {
+form label,
+.card-section label {
     display: block;
     color: var(--ink-faded);
     font-size: 0.85rem;
@@ -122,10 +138,16 @@ form label {
     margin-bottom: 0.8rem;
 }
 
+/* .card-section isn't nested in a <form> — it's a standalone paper-surface
+   block for form-adjacent content that saves independently of the card
+   form it sits beside (dictionary details, deck assignment), so its own
+   text input needs the same treatment named explicitly. */
 form input[type="text"],
 form input[type="email"],
 form input[type="number"],
-form input[type="file"] {
+form input[type="password"],
+form input[type="file"],
+.card-section input[type="text"] {
     display: block;
     width: 100%;
     font-family: var(--font-type);
@@ -138,9 +160,34 @@ form input[type="file"] {
     margin-top: 0.3rem;
 }
 
-form input:focus {
+form input:focus,
+.card-section input:focus {
     outline: none;
     border-bottom: 2px solid var(--rule-red);
+}
+
+/* Unscoped, unlike the inputs above: BulkAddPage's textarea sits directly
+   on the dark page background, before its <form> even opens (the form only
+   wraps the per-draft fields and submit button) — it needs its own paper
+   surface rather than relying on a form/.card-section ancestor to supply
+   one, since --ink text is unreadable straight on --wall-dark. */
+textarea {
+    display: block;
+    width: 100%;
+    font-family: var(--font-type);
+    font-size: 1rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 2px;
+    padding: 0.5rem 0.6rem;
+    margin-top: 0.3rem;
+    resize: vertical;
+}
+
+textarea:focus {
+    outline: none;
+    border-color: var(--rule-red);
 }
 
 button,
@@ -163,6 +210,13 @@ button:hover {
     border-color: var(--brass);
 }
 
+/* The second-click state of a `confirm_button`-rendered delete control
+   (see app.rs) — a brief red warning rather than a modal dialog. */
+button.armed {
+    background: linear-gradient(var(--rule-red), var(--wood-dark));
+    border-color: var(--rule-red);
+}
+
 select {
     font-family: var(--font-serif);
     background: var(--paper);
@@ -172,6 +226,10 @@ select {
 }
 
 /* --- Card list: a scatter of index cards pulled from the drawer --- */
+
+.card-filters {
+    margin-bottom: 1.5rem;
+}
 
 .card-grid {
     list-style: none;
@@ -195,42 +253,60 @@ select {
     transition: transform 0.15s ease;
 }
 
-.card-grid li::before {
-    content: "";
-    position: absolute;
-    top: 1.6rem;
-    left: 0.7rem;
-    right: 0.7rem;
-    border-top: 1px solid var(--rule-red);
-    opacity: 0.55;
-}
-
-.card-grid li:nth-child(odd) {
-    transform: rotate(-0.6deg);
-}
-
-.card-grid li:nth-child(even) {
-    transform: rotate(0.5deg);
-}
-
 .card-grid li:hover {
-    transform: translateY(-3px) rotate(0deg);
+    transform: translateY(-3px);
     box-shadow: 0 8px 18px var(--shadow);
     z-index: 1;
 }
 
-.card-grid li img {
+/* Thumbnails are a small accent, not the card's focus — the prompt is
+   (media where there is any, "Reveal" otherwise; target_text is always
+   the answer, see .card-grid li details below). max-height keeps a
+   tall/portrait image or a 16:9 YouTube embed from dominating the card
+   the way a full-width thumbnail used to. */
+.card-grid li img,
+.card-grid li iframe,
+.card-grid li video {
     border: 1px solid var(--paper-dark);
-    max-width: 100%;
+    max-width: 55%;
+    max-height: 5rem;
     height: auto;
     align-self: flex-start;
     margin-top: 0.6rem;
+    object-fit: cover;
+}
+
+.card-grid li iframe {
+    aspect-ratio: 560 / 315;
+}
+
+.card-grid li audio {
+    max-width: 100%;
+    align-self: flex-start;
+    margin-top: 0.6rem;
+}
+
+.card-grid li details {
+    margin-top: 0.2rem;
+}
+
+.card-grid li details summary {
+    cursor: pointer;
+    font-family: var(--font-serif);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--rule-red);
 }
 
 .card-grid li span {
     font-family: var(--font-type);
     font-size: 1.05rem;
     color: var(--ink);
+    display: inline-block;
+    margin-top: 0.4rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--rule-red) 55%, transparent);
+    padding-bottom: 0.3rem;
 }
 
 .card-grid li a {
@@ -263,12 +339,51 @@ select {
     flex-direction: column;
     align-items: center;
     gap: 0.6rem;
-    transition: transform 0.15s ease;
+    position: relative;
+    /* Drawers come toward the viewer on hover (down + slightly larger),
+       not up — the opposite direction from .card-grid li's "pick the
+       card up off the table" hover, since a drawer slides out of its
+       cabinet rather than lifting off a surface. */
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .deck-cabinet li:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 16px var(--shadow);
+    transform: translateY(6px) scale(1.03);
+    box-shadow: 0 12px 20px var(--shadow);
+    z-index: 1;
+}
+
+/* A card from inside the drawer, tucked out of sight behind the label
+   holder until hover lifts it up — the literal "card" the word is
+   written on, distinct from (and in addition to) the drawer itself
+   sliding toward the viewer. */
+.peek-card {
+    position: absolute;
+    top: 0.5rem;
+    left: 50%;
+    width: 78%;
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 1px;
+    box-shadow: 0 3px 6px var(--shadow-soft);
+    padding: 0.35rem 0.5rem;
+    font-family: var(--font-type);
+    font-size: 0.8rem;
+    color: var(--ink);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0;
+    z-index: 0;
+    pointer-events: none;
+    transform: translate(-50%, 0) rotate(-2deg);
+    transition: transform 0.25s ease 0.08s, opacity 0.25s ease 0.08s;
+}
+
+.deck-cabinet li:hover .peek-card {
+    opacity: 1;
+    transform: translate(-50%, -1.1rem) rotate(-2deg);
 }
 
 .deck-cabinet .label-holder {
@@ -279,6 +394,8 @@ select {
     padding: 0.4rem 0.5rem;
     width: 100%;
     text-align: center;
+    position: relative;
+    z-index: 1;
 }
 
 .deck-cabinet .label-holder a {
@@ -295,6 +412,11 @@ select {
     background: linear-gradient(var(--brass-bright), var(--brass-dim));
     border-radius: 2px;
     box-shadow: 0 1px 2px var(--shadow);
+    transition: box-shadow 0.2s ease;
+}
+
+.deck-cabinet li:hover .pull {
+    box-shadow: 0 2px 4px var(--shadow), 0 0 6px var(--brass-bright);
 }
 
 .deck-cabinet .manage {
@@ -310,6 +432,10 @@ select {
     box-shadow: none;
     padding: 0;
     display: flex;
+    /* Stacked, not side-by-side: a long deck name squeezed next to the
+       Rename button left no room to actually read what you were renaming. */
+    flex-direction: column;
+    align-items: flex-start;
     gap: 0.3rem;
     width: 100%;
 }
@@ -317,8 +443,7 @@ select {
 .deck-cabinet .manage input[type="text"] {
     color: var(--paper);
     border-bottom-color: var(--brass-dim);
-    flex: 1;
-    min-width: 0;
+    width: 100%;
 }
 
 .deck-cabinet .manage button {
@@ -337,24 +462,25 @@ select {
     padding: 1.5rem 1.5rem 1.2rem;
     max-width: 26rem;
     margin: 1.5rem 0;
-    position: relative;
 }
 
-.review-card::before {
-    content: "";
-    position: absolute;
-    top: 2.4rem;
-    left: 1.2rem;
-    right: 1.2rem;
-    border-top: 1px solid var(--rule-red);
-    opacity: 0.55;
-}
-
-.review-card img {
+.review-card img,
+.review-card iframe,
+.review-card video {
     display: block;
     max-width: 100%;
     height: auto;
     border: 1px solid var(--paper-dark);
+    margin: 0.8rem 0;
+}
+
+.review-card iframe {
+    aspect-ratio: 560 / 315;
+}
+
+.review-card audio {
+    display: block;
+    max-width: 100%;
     margin: 0.8rem 0;
 }
 
@@ -366,6 +492,11 @@ select {
     letter-spacing: 0.05em;
     color: var(--rule-red);
     margin-top: 0.6rem;
+    padding-bottom: 0.5rem;
+    /* Was a ::before rule at a fixed pixel offset from the card's top edge,
+       guessing where a single line of content would end — it cut straight
+       through "Reveal" on any card with no media pushing this down first. */
+    border-bottom: 1px solid color-mix(in srgb, var(--rule-red) 55%, transparent);
 }
 
 .review-card details .word-display {
@@ -466,7 +597,51 @@ select {
     float: right;
 }
 
-.dictionary-details summary {
-    cursor: pointer;
+/* A paper-surface block for form-adjacent content that saves independently
+   of the card form it sits beside — dictionary details and deck
+   assignment on EditCardPage, currently. Its own background rather than
+   just a text-color fix on its heading: this sits directly on the dark
+   page background, so --rule-red (fine against .review-card's cream
+   background elsewhere) was nearly invisible without it. */
+.card-section {
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 2px;
+    box-shadow: 0 3px 10px var(--shadow-soft);
+    padding: 0.9rem 1.1rem;
+    max-width: 32rem;
+    margin-top: 1rem;
+}
+
+.card-section-heading {
     color: var(--rule-red);
+    font-family: var(--font-serif);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 0.8rem;
+}
+
+/* --- Narrow viewports: the grids (.card-grid, .deck-cabinet) already
+   collapse on their own via auto-fill/minmax, and form/.ledger/.review-card
+   are max-width (not width), so they already shrink to fit. What's left is
+   the nav — nine uppercase, letter-spaced items with no wrap handling —
+   and main's fixed side padding eating more of a phone-width viewport than
+   it should. --- */
+@media (max-width: 640px) {
+    nav {
+        padding: 0.7rem 1rem;
+        font-size: 0.8rem;
+        letter-spacing: 0.03em;
+        line-height: 1.9;
+    }
+
+    main {
+        margin-top: 1.4rem;
+        padding: 0 1rem;
+    }
+
+    h1 {
+        font-size: 1.5rem;
+    }
 }

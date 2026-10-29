@@ -10,7 +10,10 @@ test("creating a card shows it in the shared card list", async ({ page }) => {
   await page.getByRole("button", { name: "Add" }).click();
 
   await expect(page).toHaveURL("/");
-  await expect(page.getByText(word)).toBeVisible();
+  // The word is behind each card's "Reveal" control (see app.rs's
+  // CardListPage — only the prompt/media shows up front) — hasText checks
+  // textContent, not visibility, so this still confirms the card landed.
+  await expect(page.locator("li", { hasText: word })).toHaveCount(1);
 });
 
 test("filtering by tag narrows the card list to matching cards", async ({ page }) => {
@@ -24,7 +27,7 @@ test("filtering by tag narrows the card list to matching cards", async ({ page }
   await expect(page).toHaveURL("/");
 
   await page.getByLabel("Filter by tag").selectOption(tag);
-  await expect(page.getByText(word)).toBeVisible();
+  await expect(page.locator("li", { hasText: word })).toHaveCount(1);
 });
 
 test("editing a card updates its word and is reflected in the list", async ({ page }) => {
@@ -38,13 +41,16 @@ test("editing a card updates its word and is reflected in the list", async ({ pa
 
   await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
   await page.getByLabel("Target-language word/phrase").fill(updated);
-  await page.getByRole("button", { name: "Save" }).click();
+  // exact: true — the edit page's always-visible dictionary-details
+  // section has its own "Save dictionary details" button, which "Save"
+  // would otherwise substring-match too.
+  await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page).toHaveURL(/\/cards\/[0-9a-f-]+$/);
   await expect(page.getByLabel("Target-language word/phrase")).toHaveValue(updated);
 
   await page.goto("/");
-  await expect(page.getByText(updated)).toBeVisible();
+  await expect(page.locator("li", { hasText: updated })).toHaveCount(1);
 });
 
 test("deleting a card removes it from the list", async ({ page }) => {
@@ -56,10 +62,16 @@ test("deleting a card removes it from the list", async ({ page }) => {
   await expect(page).toHaveURL("/");
 
   await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
+  // Delete requires an arming click before the confirming one — see
+  // app.rs's confirm_button.
   await page.getByRole("button", { name: "Delete card" }).click();
+  await page.getByRole("button", { name: "Confirm delete?" }).click();
 
   await expect(page).toHaveURL("/");
-  await expect(page.getByText(word, { exact: true })).not.toBeVisible();
+  // Not just "not visible" — the word is hidden behind Reveal for every
+  // card now, visible or not, so absence has to be checked by whether the
+  // card's <li> exists in the DOM at all.
+  await expect(page.locator("li", { hasText: word })).toHaveCount(0);
 });
 
 test("an anonymous visitor sees a card read-only, with no edit form", async ({ page, browser }) => {
@@ -89,6 +101,13 @@ test("an anonymous visitor sees a card read-only, with no edit form", async ({ p
   const anonPage = await anonContext.newPage();
   try {
     await anonPage.goto(absoluteCardUrl);
+    // Browsing a card to self-test is open to anyone, in the same
+    // reveal-then-show shape as the review queue — but there must be no
+    // way to grade it, since grading is what writes to the Anki-derived
+    // SRS state and that requires an account.
+    await expect(anonPage.getByText(word, { exact: true })).not.toBeVisible();
+    await expect(anonPage.locator(".review-grades")).toHaveCount(0);
+    await anonPage.getByText("Reveal").click();
     await expect(anonPage.getByText(word, { exact: true })).toBeVisible();
     await expect(anonPage.getByLabel("Target-language word/phrase")).not.toBeVisible();
     await expect(anonPage.getByRole("button", { name: "Delete card" })).not.toBeVisible();

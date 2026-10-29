@@ -55,7 +55,10 @@ test("removing an attached recording clears it from the card", async ({ page }) 
   await expect(page.locator("audio")).toBeVisible();
 
   await page.getByLabel("Remove audio").check();
-  await page.getByRole("button", { name: "Save" }).click();
+  // exact: true — the edit page's always-visible dictionary-details
+  // section has its own "Save dictionary details" button, which "Save"
+  // would otherwise substring-match too.
+  await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page).toHaveURL(/\/cards\/[0-9a-f-]+$/);
   await expect(page.locator("audio")).not.toBeVisible();
@@ -101,7 +104,10 @@ test("removing a linked YouTube video clears it from the card", async ({ page })
   await expect(page.locator("iframe")).toBeVisible();
 
   await page.getByLabel("Remove YouTube link").check();
-  await page.getByRole("button", { name: "Save" }).click();
+  // exact: true — the edit page's always-visible dictionary-details
+  // section has its own "Save dictionary details" button, which "Save"
+  // would otherwise substring-match too.
+  await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page).toHaveURL(/\/cards\/[0-9a-f-]+$/);
   await expect(page.locator("iframe")).not.toBeVisible();
@@ -120,9 +126,12 @@ test("linking a non-YouTube video shows an error, not a silent failure", async (
 
   await expect(page.getByText("that doesn't look like a YouTube video link")).toBeVisible();
   // The whole submission was rejected, not just the YouTube field
-  // silently dropped — the card was never created at all.
+  // silently dropped — the card was never created at all. Checked via the
+  // <li> itself (not getByText/toBeVisible), since the word is now hidden
+  // behind Reveal for every card that *does* exist — "not visible" alone
+  // wouldn't distinguish "never created" from "created but collapsed".
   await page.goto("/");
-  await expect(page.getByText(word, { exact: true })).not.toBeVisible();
+  await expect(page.locator("li", { hasText: word })).toHaveCount(0);
 });
 
 test("a two-way card is reviewed in both directions, independently", async ({ page }) => {

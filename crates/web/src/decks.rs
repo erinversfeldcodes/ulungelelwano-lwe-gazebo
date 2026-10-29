@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub struct Deck {
     pub id: Uuid,
     pub name: String,
+    pub sample_word: Option<String>,
 }
 
 #[cfg(feature = "ssr")]
@@ -31,6 +32,7 @@ pub async fn list_decks() -> Result<Vec<Deck>, ServerFnError> {
         .map(|r| Deck {
             id: r.id,
             name: r.name,
+            sample_word: r.sample_word,
         })
         .collect())
 }
