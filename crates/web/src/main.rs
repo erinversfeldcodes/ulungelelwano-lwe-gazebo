@@ -95,18 +95,6 @@ async fn storage_check(
     }
 }
 
-fn random_key() -> String {
-    use rand::RngExt;
-    use std::fmt::Write as _;
-
-    let bytes: [u8; 16] = rand::rng().random();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(out, "{b:02x}").unwrap();
-    }
-    out
-}
-
 /// Uploads one `image`/`audio`/`video` multipart field to storage.
 /// Best-effort, same as before this was extracted: with no storage
 /// configured (e.g. local dev without the S3_* env vars set), an attached
@@ -128,7 +116,7 @@ async fn upload_media_field(
     }
     match (&state.storage, content_type) {
         (Some(storage), Some(content_type)) => {
-            let key = format!("cards/{}", random_key());
+            let key = format!("cards/{}", web::storage::random_key());
             let url = storage
                 .upload(&key, &content_type, &data)
                 .await
@@ -258,7 +246,9 @@ async fn parse_card_multipart(
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
-            "target_text" => fields.target_text = field.text().await.unwrap_or_default(),
+            "target_text" => {
+                fields.target_text = field.text().await.unwrap_or_default().trim().to_string();
+            }
             "tags" => fields.tags_raw = field.text().await.unwrap_or_default(),
             // A checkbox only appears in the multipart body at all when
             // checked, so this field's mere presence means true.
@@ -268,6 +258,17 @@ async fn parse_card_multipart(
             "remove_video" => fields.remove_video = true,
             "remove_youtube" => fields.remove_youtube = true,
             "image" => fields.image_url = upload_media_field(state, field, "image").await?,
+            // Set once a search result has been imported (see
+            // cards::import_card_image) and carried into the form as a
+            // hidden field placed after the "image" file input, so this
+            // arm runs later and wins if the user somehow set both.
+            "image_url" => {
+                let raw = field.text().await.unwrap_or_default();
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    fields.image_url = Some(trimmed.to_string());
+                }
+            }
             "audio" => fields.audio_url = upload_media_field(state, field, "audio").await?,
             "video" => fields.video_url = upload_media_field(state, field, "video").await?,
             "youtube_url" => {
@@ -329,6 +330,112 @@ async fn cards_new(
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(axum::response::Redirect::to("/"))
+}
+
+/// One parsed-and-ready-to-create entry from the bulk-add page — a target
+/// word/phrase plus whichever image (uploaded file or search import) was
+/// attached to it. The English translation used to search for that image
+/// never reaches here at all — see `ImageSearchPicker`'s doc comment — so
+/// there's nothing to carry for it.
+#[cfg(feature = "ssr")]
+struct BulkDraftFields {
+    target_text: String,
+    image_url: Option<String>,
+}
+
+/// Parses `BulkAddPage`'s submission: one `<div>` per draft, each
+/// contributing its own `target_text_{i}`/`image_{i}`/`image_url_{i}`
+/// fields (indexed rather than one of each, since this form carries an
+/// unbounded number of cards at once — see `cards_bulk`). Field order
+/// within the multipart body isn't assumed; a `BTreeMap` keyed by index
+/// collects everything first, then gets flattened once the whole body has
+/// been read.
+#[cfg(feature = "ssr")]
+async fn parse_bulk_multipart(
+    state: &AppState,
+    multipart: &mut axum::extract::Multipart,
+) -> Result<Vec<BulkDraftFields>, (axum::http::StatusCode, String)> {
+    let mut target_texts: std::collections::BTreeMap<usize, String> =
+        std::collections::BTreeMap::new();
+    let mut image_urls: std::collections::BTreeMap<usize, String> =
+        std::collections::BTreeMap::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        // "image_url_" must be checked before "image_" — it's the more
+        // specific prefix, and would otherwise also match the latter.
+        if let Some(idx) = name
+            .strip_prefix("target_text_")
+            .and_then(|s| s.parse().ok())
+        {
+            target_texts.insert(idx, field.text().await.unwrap_or_default());
+        } else if let Some(idx) = name.strip_prefix("image_url_").and_then(|s| s.parse().ok()) {
+            let raw = field.text().await.unwrap_or_default();
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                image_urls.insert(idx, trimmed.to_string());
+            }
+        } else if let Some(idx) = name.strip_prefix("image_").and_then(|s| s.parse().ok())
+            && let Some(url) = upload_media_field(state, field, "image").await?
+        {
+            image_urls.insert(idx, url);
+        }
+    }
+
+    Ok(target_texts
+        .into_iter()
+        .filter_map(|(idx, target_text)| {
+            let target_text = target_text.trim().to_string();
+            (!target_text.is_empty()).then(|| BulkDraftFields {
+                target_text,
+                image_url: image_urls.get(&idx).cloned(),
+            })
+        })
+        .collect())
+}
+
+/// Creates every draft from `BulkAddPage` in one submission. Stops at the
+/// first failure — same bail-on-first-error semantics `cards_new` already
+/// uses — rather than inventing partial-success UX for what should be a
+/// rare failure mode (mainly a DB connectivity issue, since a storage
+/// upload failure already degrades to "no image" silently upstream).
+/// Drafts created before a later failure stay created; this isn't
+/// transactional.
+#[cfg(feature = "ssr")]
+async fn cards_bulk(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    cookies: tower_cookies::Cookies,
+    mut multipart: axum::extract::Multipart,
+) -> Result<axum::response::Redirect, (axum::http::StatusCode, String)> {
+    let user = web::auth::current_user(&state.db_pool, &cookies)
+        .await
+        .ok_or((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "not signed in".to_string(),
+        ))?;
+
+    let drafts = parse_bulk_multipart(&state, &mut multipart).await?;
+
+    for draft in drafts {
+        web::db::create_card(
+            &state.db_pool,
+            user.id,
+            web::db::NewCard {
+                image_url: draft.image_url.as_deref().unwrap_or(""),
+                target_text: &draft.target_text,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     Ok(axum::response::Redirect::to("/"))
 }
@@ -427,6 +534,37 @@ async fn auth_logout(
     axum::response::Redirect::to("/login")
 }
 
+// Neon's compute suspends after a few idle minutes on the plan this project
+// runs on (free — scale-to-zero can't be disabled there), and the very
+// first connection after it resumes can transiently fail auth before
+// settling, confirmed against a real preview deploy via Neon's own
+// operations log. Retrying absorbs that without masking a genuinely wrong
+// DATABASE_URL, which still exhausts these attempts and panics as before.
+#[cfg(feature = "ssr")]
+async fn connect_with_retry(database_url: &str) -> sqlx::PgPool {
+    const MAX_ATTEMPTS: u32 = 6;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(database_url)
+            .await
+        {
+            Ok(pool) => return pool,
+            Err(err) if attempt < MAX_ATTEMPTS => {
+                log::warn!(
+                    "database connection attempt {attempt}/{MAX_ATTEMPTS} failed, retrying: {err}"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt) * 2)).await;
+            }
+            Err(err) => {
+                panic!("failed to connect to the database after {MAX_ATTEMPTS} attempts: {err}")
+            }
+        }
+    }
+}
+
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {
@@ -443,11 +581,7 @@ async fn main() {
     let routes = generate_route_list(App);
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let db_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to the database");
+    let db_pool = connect_with_retry(&database_url).await;
 
     // Embedded at compile time (no runtime file access needed, so this
     // works unchanged in the minimal Docker runtime image) and applied on
@@ -467,6 +601,7 @@ async fn main() {
         db_pool,
         email_sender: web::email::EmailSender::from_env(),
         storage: web::storage::Storage::from_env(),
+        image_search: web::image_search::ImageSearch::from_env(),
     };
 
     let app = Router::new()
@@ -479,6 +614,7 @@ async fn main() {
         .route("/internal/email-check", axum::routing::get(email_check))
         .route("/internal/storage-check", axum::routing::get(storage_check))
         .route("/cards/new", axum::routing::post(cards_new))
+        .route("/cards/bulk", axum::routing::post(cards_bulk))
         .route("/cards/{id}", axum::routing::post(cards_update))
         .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell))
         .layer(tower_cookies::CookieManagerLayer::new())

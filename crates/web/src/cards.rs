@@ -182,6 +182,71 @@ pub async fn get_card(card_id: Uuid) -> Result<Option<CardDetail>, ServerFnError
     }))
 }
 
+/// A client-facing image search result — see
+/// `crate::image_search::ImageResult`, which this mirrors field for field.
+/// A separate type so the server function's generated client stub doesn't
+/// need `#[cfg(feature = "ssr")]` on the whole module just to name the
+/// ssr-only `image_search` type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSearchResult {
+    pub provider: String,
+    pub id: String,
+    pub thumbnail_url: String,
+    pub description: String,
+}
+
+#[cfg(feature = "ssr")]
+impl From<crate::image_search::ImageResult> for ImageSearchResult {
+    fn from(r: crate::image_search::ImageResult) -> Self {
+        Self {
+            provider: r.provider,
+            id: r.id,
+            thumbnail_url: r.thumbnail_url,
+            description: r.description,
+        }
+    }
+}
+
+#[server]
+pub async fn search_card_images(query: String) -> Result<Vec<ImageSearchResult>, ServerFnError> {
+    require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    Ok(state
+        .image_search
+        .search(&query)
+        .await
+        .into_iter()
+        .map(Into::into)
+        .collect())
+}
+
+/// Fetches a specific search result's full-resolution image server-side
+/// (re-querying the provider by id, never the thumbnail URL the browser
+/// already has — see `ImageSearch::fetch_by_id`) and uploads it to our own
+/// storage, so a card's image is always something we host, the same as a
+/// directly uploaded file. Returns the resulting URL for the new/edit card
+/// form to carry as a plain hidden field (see `parse_card_multipart` in
+/// main.rs).
+#[server]
+pub async fn import_card_image(provider: String, id: String) -> Result<String, ServerFnError> {
+    require_user().await?;
+    let state = expect_context::<crate::state::AppState>();
+    let (bytes, content_type) = state
+        .image_search
+        .fetch_by_id(&provider, &id)
+        .await
+        .map_err(ServerFnError::new)?;
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("image storage isn't configured"))?;
+    let key = format!("cards/{}", crate::storage::random_key());
+    storage
+        .upload(&key, &content_type, &bytes)
+        .await
+        .map_err(ServerFnError::new)
+}
+
 #[server]
 pub async fn delete_card(card_id: Uuid) -> Result<(), ServerFnError> {
     require_user().await?;

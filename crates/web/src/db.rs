@@ -790,6 +790,183 @@ async fn streak_days(pool: &PgPool, user_id: Uuid) -> sqlx::Result<i64> {
     Ok(streak)
 }
 
+// --- dictionary (words) -----------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct WordRow {
+    pub id: Uuid,
+    pub target_text: String,
+    pub part_of_speech: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct WordExampleRow {
+    pub target_sentence: String,
+    pub gloss_sentence: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LinkedWordRow {
+    pub target_text: String,
+    pub link_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WordDefinitionRow {
+    pub target_text: String,
+    pub part_of_speech: Option<String>,
+    pub notes: Option<String>,
+    pub examples: Vec<WordExampleRow>,
+    pub linked_words: Vec<LinkedWordRow>,
+}
+
+async fn get_word_by_text(pool: &PgPool, target_text: &str) -> sqlx::Result<Option<WordRow>> {
+    sqlx::query_as(
+        "SELECT id, target_text, part_of_speech, notes FROM words WHERE target_text = $1",
+    )
+    .bind(target_text)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn word_examples(pool: &PgPool, word_id: Uuid) -> sqlx::Result<Vec<WordExampleRow>> {
+    sqlx::query_as(
+        "SELECT target_sentence, gloss_sentence FROM word_examples \
+         WHERE word_id = $1 ORDER BY created_at",
+    )
+    .bind(word_id)
+    .fetch_all(pool)
+    .await
+}
+
+async fn linked_words(pool: &PgPool, word_id: Uuid) -> sqlx::Result<Vec<LinkedWordRow>> {
+    sqlx::query_as(
+        "SELECT w.target_text, wl.link_type FROM word_links wl \
+         JOIN words w ON w.id = CASE WHEN wl.word_id = $1 THEN wl.linked_word_id ELSE wl.word_id END \
+         WHERE wl.word_id = $1 OR wl.linked_word_id = $1 \
+         ORDER BY w.target_text",
+    )
+    .bind(word_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Looks up a word's dictionary entry by its exact (trimmed) spelling.
+/// `Ok(None)` means there's no entry yet — a normal, expected outcome for
+/// most words, not an error condition.
+pub async fn get_word_definition(
+    pool: &PgPool,
+    target_text: &str,
+) -> sqlx::Result<Option<WordDefinitionRow>> {
+    let Some(word) = get_word_by_text(pool, target_text).await? else {
+        return Ok(None);
+    };
+    let examples = word_examples(pool, word.id).await?;
+    let linked_words = linked_words(pool, word.id).await?;
+    Ok(Some(WordDefinitionRow {
+        target_text: word.target_text,
+        part_of_speech: word.part_of_speech,
+        notes: word.notes,
+        examples,
+        linked_words,
+    }))
+}
+
+/// Finds or creates a bare `words` row for `target_text` — used only to get
+/// a satisfiable `word_id` for a `word_links` row when a linked word doesn't
+/// have its own dictionary entry yet. The `DO UPDATE` is a deliberate no-op,
+/// present purely so `RETURNING id` still fires on conflict — this must
+/// never touch an existing entry's `part_of_speech`/`notes` the way the real
+/// upsert below does.
+async fn resolve_or_create_word_id_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    target_text: &str,
+    created_by: Uuid,
+) -> sqlx::Result<Uuid> {
+    sqlx::query_scalar(
+        "INSERT INTO words (target_text, created_by) VALUES ($1, $2) \
+         ON CONFLICT (target_text) DO UPDATE SET target_text = EXCLUDED.target_text \
+         RETURNING id",
+    )
+    .bind(target_text)
+    .bind(created_by)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+/// Creates or updates `target_text`'s dictionary entry, replacing its
+/// examples and linked words wholesale — the same delete-then-reinsert idiom
+/// `update_card`/`set_card_tags_in_tx` already use for tags. `created_by` is
+/// only ever applied on first insert (the `ON CONFLICT` branch never
+/// touches it). The single write path for the card form's "Dictionary
+/// details" section.
+pub async fn upsert_word_definition(
+    pool: &PgPool,
+    target_text: &str,
+    created_by: Uuid,
+    part_of_speech: Option<&str>,
+    notes: Option<&str>,
+    examples: &[(String, Option<String>)],
+    linked_word_texts: &[String],
+) -> sqlx::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+
+    let word_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO words (target_text, part_of_speech, notes, created_by) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (target_text) DO UPDATE SET \
+            part_of_speech = EXCLUDED.part_of_speech, \
+            notes = EXCLUDED.notes, \
+            updated_at = now() \
+         RETURNING id",
+    )
+    .bind(target_text)
+    .bind(part_of_speech)
+    .bind(notes)
+    .bind(created_by)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM word_examples WHERE word_id = $1")
+        .bind(word_id)
+        .execute(&mut *tx)
+        .await?;
+    for (target_sentence, gloss_sentence) in examples {
+        sqlx::query(
+            "INSERT INTO word_examples (word_id, target_sentence, gloss_sentence) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(word_id)
+        .bind(target_sentence)
+        .bind(gloss_sentence.as_deref())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query("DELETE FROM word_links WHERE word_id = $1 OR linked_word_id = $1")
+        .bind(word_id)
+        .execute(&mut *tx)
+        .await?;
+    for linked_text in linked_word_texts {
+        if linked_text == target_text {
+            continue; // a word can't be related to itself
+        }
+        let linked_id = resolve_or_create_word_id_in_tx(&mut tx, linked_text, created_by).await?;
+        sqlx::query(
+            "INSERT INTO word_links (word_id, linked_word_id, link_type) \
+             VALUES ($1, $2, 'related') ON CONFLICT DO NOTHING",
+        )
+        .bind(word_id)
+        .bind(linked_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(word_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1334,5 +1511,152 @@ mod tests {
         assert_eq!(stats.reviews_today, 2);
         assert_eq!(stats.current_streak_days, 1);
         assert_eq!(stats.total_cards, 2);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn upsert_word_definition_creates_a_new_word_with_examples_and_links(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+
+        upsert_word_definition(
+            &pool,
+            "perro",
+            user_id,
+            Some("noun"),
+            Some("the common word for dog"),
+            &[(
+                "El perro corre.".to_string(),
+                Some("The dog runs.".to_string()),
+            )],
+            &["can".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let def = get_word_definition(&pool, "perro").await.unwrap().unwrap();
+        assert_eq!(def.part_of_speech, Some("noun".to_string()));
+        assert_eq!(def.notes, Some("the common word for dog".to_string()));
+        assert_eq!(def.examples.len(), 1);
+        assert_eq!(def.examples[0].target_sentence, "El perro corre.");
+        assert_eq!(def.linked_words.len(), 1);
+        assert_eq!(def.linked_words[0].target_text, "can");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn upsert_word_definition_on_same_text_updates_rather_than_duplicates(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+
+        upsert_word_definition(&pool, "casa", user_id, Some("noun"), None, &[], &[])
+            .await
+            .unwrap();
+        upsert_word_definition(
+            &pool,
+            "casa",
+            user_id,
+            Some("noun (updated)"),
+            None,
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM words WHERE target_text = $1")
+            .bind("casa")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let def = get_word_definition(&pool, "casa").await.unwrap().unwrap();
+        assert_eq!(def.part_of_speech, Some("noun (updated)".to_string()));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn get_word_definition_returns_none_for_unknown_text(pool: PgPool) {
+        assert!(
+            get_word_definition(&pool, "nonexistent")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn linked_words_are_symmetric_regardless_of_which_side_was_saved(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+
+        upsert_word_definition(&pool, "a", user_id, None, None, &[], &["b".to_string()])
+            .await
+            .unwrap();
+
+        let def_b = get_word_definition(&pool, "b").await.unwrap().unwrap();
+        assert_eq!(def_b.linked_words.len(), 1);
+        assert_eq!(def_b.linked_words[0].target_text, "a");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn re_saving_a_words_links_replaces_the_previous_set(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+
+        upsert_word_definition(
+            &pool,
+            "a",
+            user_id,
+            None,
+            None,
+            &[],
+            &["b".to_string(), "c".to_string()],
+        )
+        .await
+        .unwrap();
+        upsert_word_definition(&pool, "a", user_id, None, None, &[], &["c".to_string()])
+            .await
+            .unwrap();
+
+        let def_a = get_word_definition(&pool, "a").await.unwrap().unwrap();
+        assert_eq!(def_a.linked_words.len(), 1);
+        assert_eq!(def_a.linked_words[0].target_text, "c");
+
+        let def_b = get_word_definition(&pool, "b").await.unwrap().unwrap();
+        assert!(def_b.linked_words.is_empty());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn linking_to_a_word_with_no_existing_entry_creates_a_satisfiable_stub_row(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+
+        upsert_word_definition(&pool, "a", user_id, None, None, &[], &["stub".to_string()])
+            .await
+            .unwrap();
+
+        // The stub has no part_of_speech/notes of its own yet, but it
+        // exists and is linked.
+        let def_stub = get_word_definition(&pool, "stub").await.unwrap().unwrap();
+        assert_eq!(def_stub.part_of_speech, None);
+        assert_eq!(def_stub.linked_words[0].target_text, "a");
+
+        // Giving the stub its own real entry later updates it in place
+        // rather than creating a second `words` row.
+        upsert_word_definition(&pool, "stub", user_id, Some("noun"), None, &[], &[])
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM words WHERE target_text = $1")
+            .bind("stub")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_word_is_never_linked_to_itself(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+
+        upsert_word_definition(&pool, "a", user_id, None, None, &[], &["a".to_string()])
+            .await
+            .unwrap();
+
+        let def_a = get_word_definition(&pool, "a").await.unwrap().unwrap();
+        assert!(def_a.linked_words.is_empty());
     }
 }

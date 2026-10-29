@@ -49,6 +49,11 @@ jobs:
       # sqlx::test needs CREATEDB privilege to spin up a fresh database per
       # test; the default role from the postgres image already has it.
       DATABASE_URL: postgres://app:app@localhost:5432/app
+      # image_search::tests::real_providers_all_respond_to_a_search hits
+      # the real Pixabay API and fails loudly (not a skip) if the key is
+      # missing or Pixabay doesn't respond — see that test's own doc
+      # comment for why this is deliberate.
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -104,6 +109,16 @@ jobs:
       S3_PUBLIC_URL: http://gazebo-cards.web.garage.localhost:3902
       S3_PATH_STYLE: "true"
       S3_REGION: garage
+      # image-search.spec.ts's two real-provider tests need this to reach
+      # Pixabay for real — see that file's own comment on why it's not
+      # mocked.
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      # env_logger (see main.rs's env_logger::init()) prints nothing at
+      # all without this — the app's own log::warn! on a failed provider
+      # request (see image_search.rs's search) would otherwise vanish
+      # silently, leaving a real connectivity failure indistinguishable
+      # from a search that legitimately found nothing.
+      RUST_LOG: info
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -124,7 +139,11 @@ jobs:
       - run: sqlx migrate run --source migrations
       - run: cargo leptos build
       - name: Start the app in the background
-        run: ./target/debug/web &
+        # Redirected to a file so the server's own logs (RUST_LOG above)
+        # are actually retrievable afterwards — see the artifact upload
+        # step below — rather than mixed into this step's own transient
+        # output.
+        run: ./target/debug/web > web-server.log 2>&1 &
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -157,5 +176,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-traces-ci
-          path: e2e/test-results/
+          path: |
+            e2e/test-results/
+            web-server.log
           retention-days: 14
