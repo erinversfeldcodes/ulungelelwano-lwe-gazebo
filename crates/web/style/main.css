@@ -249,16 +249,6 @@ select {
     transition: transform 0.15s ease;
 }
 
-.card-grid li::before {
-    content: "";
-    position: absolute;
-    top: 1.6rem;
-    left: 0.7rem;
-    right: 0.7rem;
-    border-top: 1px solid var(--rule-red);
-    opacity: 0.55;
-}
-
 .card-grid li:nth-child(odd) {
     transform: rotate(-0.6deg);
 }
@@ -273,10 +263,22 @@ select {
     z-index: 1;
 }
 
-.card-grid li img {
+.card-grid li img,
+.card-grid li iframe,
+.card-grid li video {
     border: 1px solid var(--paper-dark);
     max-width: 100%;
     height: auto;
+    align-self: flex-start;
+    margin-top: 0.6rem;
+}
+
+.card-grid li iframe {
+    aspect-ratio: 560 / 315;
+}
+
+.card-grid li audio {
+    max-width: 100%;
     align-self: flex-start;
     margin-top: 0.6rem;
 }
@@ -285,6 +287,9 @@ select {
     font-family: var(--font-type);
     font-size: 1.05rem;
     color: var(--ink);
+    display: inline-block;
+    border-bottom: 1px solid color-mix(in srgb, var(--rule-red) 55%, transparent);
+    padding-bottom: 0.3rem;
 }
 
 .card-grid li a {
@@ -317,12 +322,16 @@ select {
     flex-direction: column;
     align-items: center;
     gap: 0.6rem;
-    transition: transform 0.15s ease;
+    /* Drawers come toward the viewer on hover (down + slightly larger),
+       not up — the opposite direction from .card-grid li's "pick the
+       card up off the table" hover, since a drawer slides out of its
+       cabinet rather than lifting off a surface. */
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .deck-cabinet li:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 16px var(--shadow);
+    transform: translateY(6px) scale(1.03);
+    box-shadow: 0 12px 20px var(--shadow);
 }
 
 .deck-cabinet .label-holder {
@@ -333,6 +342,14 @@ select {
     padding: 0.4rem 0.5rem;
     width: 100%;
     text-align: center;
+    /* Slightly delayed relative to the drawer's own hover transition, so
+       the card inside visibly peeks up a beat after the drawer opens. */
+    transition: transform 0.2s ease 0.08s, box-shadow 0.2s ease 0.08s;
+}
+
+.deck-cabinet li:hover .label-holder {
+    transform: translateY(-10px);
+    box-shadow: 0 6px 10px var(--shadow), inset 0 0 4px rgba(0, 0, 0, 0.25);
 }
 
 .deck-cabinet .label-holder a {
@@ -349,6 +366,11 @@ select {
     background: linear-gradient(var(--brass-bright), var(--brass-dim));
     border-radius: 2px;
     box-shadow: 0 1px 2px var(--shadow);
+    transition: box-shadow 0.2s ease;
+}
+
+.deck-cabinet li:hover .pull {
+    box-shadow: 0 2px 4px var(--shadow), 0 0 6px var(--brass-bright);
 }
 
 .deck-cabinet .manage {
@@ -364,6 +386,10 @@ select {
     box-shadow: none;
     padding: 0;
     display: flex;
+    /* Stacked, not side-by-side: a long deck name squeezed next to the
+       Rename button left no room to actually read what you were renaming. */
+    flex-direction: column;
+    align-items: flex-start;
     gap: 0.3rem;
     width: 100%;
 }
@@ -371,8 +397,7 @@ select {
 .deck-cabinet .manage input[type="text"] {
     color: var(--paper);
     border-bottom-color: var(--brass-dim);
-    flex: 1;
-    min-width: 0;
+    width: 100%;
 }
 
 .deck-cabinet .manage button {
@@ -391,24 +416,25 @@ select {
     padding: 1.5rem 1.5rem 1.2rem;
     max-width: 26rem;
     margin: 1.5rem 0;
-    position: relative;
 }
 
-.review-card::before {
-    content: "";
-    position: absolute;
-    top: 2.4rem;
-    left: 1.2rem;
-    right: 1.2rem;
-    border-top: 1px solid var(--rule-red);
-    opacity: 0.55;
-}
-
-.review-card img {
+.review-card img,
+.review-card iframe,
+.review-card video {
     display: block;
     max-width: 100%;
     height: auto;
     border: 1px solid var(--paper-dark);
+    margin: 0.8rem 0;
+}
+
+.review-card iframe {
+    aspect-ratio: 560 / 315;
+}
+
+.review-card audio {
+    display: block;
+    max-width: 100%;
     margin: 0.8rem 0;
 }
 
@@ -420,6 +446,11 @@ select {
     letter-spacing: 0.05em;
     color: var(--rule-red);
     margin-top: 0.6rem;
+    padding-bottom: 0.5rem;
+    /* Was a ::before rule at a fixed pixel offset from the card's top edge,
+       guessing where a single line of content would end — it cut straight
+       through "Reveal" on any card with no media pushing this down first. */
+    border-bottom: 1px solid color-mix(in srgb, var(--rule-red) 55%, transparent);
 }
 
 .review-card details .word-display {

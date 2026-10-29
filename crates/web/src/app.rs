@@ -614,11 +614,6 @@ fn NewCardPage() -> impl IntoView {
                 }
                 view! {
                     <form method="post" action="/cards/new" enctype="multipart/form-data">
-                        <MediaAttachmentFields
-                            chosen_image_url=chosen_image_url
-                            audio_input=audio_input
-                            video_input=video_input
-                        />
                         <label>
                             "Target-language word/phrase"
                             <input
@@ -628,6 +623,11 @@ fn NewCardPage() -> impl IntoView {
                             />
                         </label>
                         <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
+                        <MediaAttachmentFields
+                            chosen_image_url=chosen_image_url
+                            audio_input=audio_input
+                            video_input=video_input
+                        />
                         <label>
                             <input type="checkbox" name="two_way" />
                             "Two-way: also review back → front, scheduled independently"
@@ -857,18 +857,36 @@ fn EditCardPage() -> impl IntoView {
                         let youtube_view = detail.youtube_url.clone().map(youtube_embed);
                         let deck_ids = detail.deck_ids.clone();
 
-                        // Anyone can view a card; only a signed-in user sees
-                        // the mutable form, deck checkboxes, and delete
-                        // button in place of their read-only equivalents.
-                        let read_only_info = (!signed_in).then(|| {
+                        // A signed-in editor sees the word immediately — visual
+                        // confirmation of which card this is before the
+                        // (possibly media-heavy) form below it. A signed-out
+                        // visitor instead gets the same reveal-then-show shape
+                        // as ReviewPage's forward direction: media is the
+                        // prompt, the word is hidden behind "Reveal". Browsing
+                        // a card to self-test is open to anyone; it's only
+                        // *grading* (ReviewPage's Again/Hard/Good/Easy, which
+                        // writes to the Anki-derived SRS state) that requires
+                        // an account — there's no grading UI here at all.
+                        let word_preview = {
                             let target_text = detail.target_text.clone();
                             let tags_display = detail.tags.join(", ");
-                            view! {
+                            let info = view! {
                                 <div class="word-display"><ClickableWord text=target_text /></div>
                                 {(!detail.tags.is_empty())
                                     .then(|| view! { <p>"Tags: " {tags_display}</p> })}
+                            };
+                            if signed_in {
+                                info.into_any()
+                            } else {
+                                view! {
+                                    <details>
+                                        <summary>"Reveal"</summary>
+                                        {info}
+                                    </details>
+                                }
+                                .into_any()
                             }
-                        });
+                        };
                         // Tracks the input's *current* value reactively, so
                         // the "Dictionary details" editor below always saves
                         // against whatever's actually typed — including a
@@ -917,16 +935,6 @@ fn EditCardPage() -> impl IntoView {
                             let tags_value = detail.tags.join(", ");
                             view! {
                                 <form method="post" action=action enctype="multipart/form-data">
-                                    <MediaAttachmentFields
-                                        editing=true
-                                        chosen_image_url=chosen_image_url
-                                        audio_input=audio_input
-                                        video_input=video_input
-                                        has_image=detail.image_url.is_some()
-                                        has_audio=detail.audio_url.is_some()
-                                        has_video=detail.video_url.is_some()
-                                        has_youtube=detail.youtube_url.is_some()
-                                    />
                                     <label>
                                         "Target-language word/phrase"
                                         <input
@@ -937,6 +945,16 @@ fn EditCardPage() -> impl IntoView {
                                         />
                                     </label>
                                     <label>"Tags (comma separated)" <input type="text" name="tags" value=tags_value /></label>
+                                    <MediaAttachmentFields
+                                        editing=true
+                                        chosen_image_url=chosen_image_url
+                                        audio_input=audio_input
+                                        video_input=video_input
+                                        has_image=detail.image_url.is_some()
+                                        has_audio=detail.audio_url.is_some()
+                                        has_video=detail.video_url.is_some()
+                                        has_youtube=detail.youtube_url.is_some()
+                                    />
                                     <label>
                                         <input type="checkbox" name="two_way" checked=detail.two_way />
                                         "Two-way: also review back → front, scheduled independently"
@@ -1023,7 +1041,7 @@ fn EditCardPage() -> impl IntoView {
                                 {audio_view}
                                 {video_view}
                                 {youtube_view}
-                                {read_only_info}
+                                {word_preview}
                             </div>
                             {edit_form}
                             {dictionary_editor}

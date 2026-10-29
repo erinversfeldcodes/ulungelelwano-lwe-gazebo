@@ -55,7 +55,10 @@ test("removing an attached recording clears it from the card", async ({ page }) 
   await expect(page.locator("audio")).toBeVisible();
 
   await page.getByLabel("Remove audio").check();
-  await page.getByRole("button", { name: "Save" }).click();
+  // exact: true — the edit page's always-visible dictionary-details
+  // section has its own "Save dictionary details" button, which "Save"
+  // would otherwise substring-match too.
+  await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page).toHaveURL(/\/cards\/[0-9a-f-]+$/);
   await expect(page.locator("audio")).not.toBeVisible();
@@ -101,7 +104,10 @@ test("removing a linked YouTube video clears it from the card", async ({ page })
   await expect(page.locator("iframe")).toBeVisible();
 
   await page.getByLabel("Remove YouTube link").check();
-  await page.getByRole("button", { name: "Save" }).click();
+  // exact: true — the edit page's always-visible dictionary-details
+  // section has its own "Save dictionary details" button, which "Save"
+  // would otherwise substring-match too.
+  await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page).toHaveURL(/\/cards\/[0-9a-f-]+$/);
   await expect(page.locator("iframe")).not.toBeVisible();

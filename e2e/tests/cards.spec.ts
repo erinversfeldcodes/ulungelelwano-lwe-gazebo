@@ -38,7 +38,10 @@ test("editing a card updates its word and is reflected in the list", async ({ pa
 
   await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
   await page.getByLabel("Target-language word/phrase").fill(updated);
-  await page.getByRole("button", { name: "Save" }).click();
+  // exact: true — the edit page's always-visible dictionary-details
+  // section has its own "Save dictionary details" button, which "Save"
+  // would otherwise substring-match too.
+  await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page).toHaveURL(/\/cards\/[0-9a-f-]+$/);
   await expect(page.getByLabel("Target-language word/phrase")).toHaveValue(updated);
