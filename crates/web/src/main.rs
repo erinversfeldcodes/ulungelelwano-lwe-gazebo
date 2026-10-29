@@ -532,6 +532,37 @@ async fn auth_logout(
     axum::response::Redirect::to("/login")
 }
 
+// Neon's compute suspends after a few idle minutes on the plan this project
+// runs on (free — scale-to-zero can't be disabled there), and the very
+// first connection after it resumes can transiently fail auth before
+// settling, confirmed against a real preview deploy via Neon's own
+// operations log. Retrying absorbs that without masking a genuinely wrong
+// DATABASE_URL, which still exhausts these attempts and panics as before.
+#[cfg(feature = "ssr")]
+async fn connect_with_retry(database_url: &str) -> sqlx::PgPool {
+    const MAX_ATTEMPTS: u32 = 6;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(database_url)
+            .await
+        {
+            Ok(pool) => return pool,
+            Err(err) if attempt < MAX_ATTEMPTS => {
+                log::warn!(
+                    "database connection attempt {attempt}/{MAX_ATTEMPTS} failed, retrying: {err}"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt) * 2)).await;
+            }
+            Err(err) => {
+                panic!("failed to connect to the database after {MAX_ATTEMPTS} attempts: {err}")
+            }
+        }
+    }
+}
+
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {
@@ -548,11 +579,7 @@ async fn main() {
     let routes = generate_route_list(App);
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let db_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("failed to connect to the database");
+    let db_pool = connect_with_retry(&database_url).await;
 
     // Embedded at compile time (no runtime file access needed, so this
     // works unchanged in the minimal Docker runtime image) and applied on
