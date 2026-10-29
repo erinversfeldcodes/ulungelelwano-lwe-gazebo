@@ -126,9 +126,12 @@ test("linking a non-YouTube video shows an error, not a silent failure", async (
 
   await expect(page.getByText("that doesn't look like a YouTube video link")).toBeVisible();
   // The whole submission was rejected, not just the YouTube field
-  // silently dropped — the card was never created at all.
+  // silently dropped — the card was never created at all. Checked via the
+  // <li> itself (not getByText/toBeVisible), since the word is now hidden
+  // behind Reveal for every card that *does* exist — "not visible" alone
+  // wouldn't distinguish "never created" from "created but collapsed".
   await page.goto("/");
-  await expect(page.getByText(word, { exact: true })).not.toBeVisible();
+  await expect(page.locator("li", { hasText: word })).toHaveCount(0);
 });
 
 test("a two-way card is reviewed in both directions, independently", async ({ page }) => {

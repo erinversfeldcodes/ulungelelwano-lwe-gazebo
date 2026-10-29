@@ -499,7 +499,7 @@ fn CardListPage() -> impl IntoView {
 
     view! {
         <h1>"Cards"</h1>
-        <div>
+        <div class="card-filters">
             <label>
                 "Filter by tag "
                 <select
@@ -579,7 +579,14 @@ fn CardListPage() -> impl IntoView {
                                                 .video_url
                                                 .map(|url| view! { <video controls src=url></video> })}
                                             {card.youtube_url.map(youtube_embed)}
-                                            <span>{card.target_text}</span>
+                                            // The grid is a browsing/self-test view — only the
+                                            // prompt (media, if any) shows up front, same as
+                                            // ReviewPage and EditCardPage's signed-out view.
+                                            // target_text is the answer, behind Reveal.
+                                            <details>
+                                                <summary>"Reveal"</summary>
+                                                <span>{card.target_text}</span>
+                                            </details>
                                             " "
                                             <A href=edit_href>"Edit"</A>
                                         </li>

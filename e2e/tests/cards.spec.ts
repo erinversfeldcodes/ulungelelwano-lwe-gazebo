@@ -10,7 +10,10 @@ test("creating a card shows it in the shared card list", async ({ page }) => {
   await page.getByRole("button", { name: "Add" }).click();
 
   await expect(page).toHaveURL("/");
-  await expect(page.getByText(word)).toBeVisible();
+  // The word is behind each card's "Reveal" control (see app.rs's
+  // CardListPage — only the prompt/media shows up front) — hasText checks
+  // textContent, not visibility, so this still confirms the card landed.
+  await expect(page.locator("li", { hasText: word })).toHaveCount(1);
 });
 
 test("filtering by tag narrows the card list to matching cards", async ({ page }) => {
@@ -24,7 +27,7 @@ test("filtering by tag narrows the card list to matching cards", async ({ page }
   await expect(page).toHaveURL("/");
 
   await page.getByLabel("Filter by tag").selectOption(tag);
-  await expect(page.getByText(word)).toBeVisible();
+  await expect(page.locator("li", { hasText: word })).toHaveCount(1);
 });
 
 test("editing a card updates its word and is reflected in the list", async ({ page }) => {
@@ -47,7 +50,7 @@ test("editing a card updates its word and is reflected in the list", async ({ pa
   await expect(page.getByLabel("Target-language word/phrase")).toHaveValue(updated);
 
   await page.goto("/");
-  await expect(page.getByText(updated)).toBeVisible();
+  await expect(page.locator("li", { hasText: updated })).toHaveCount(1);
 });
 
 test("deleting a card removes it from the list", async ({ page }) => {
@@ -65,7 +68,10 @@ test("deleting a card removes it from the list", async ({ page }) => {
   await page.getByRole("button", { name: "Confirm delete?" }).click();
 
   await expect(page).toHaveURL("/");
-  await expect(page.getByText(word, { exact: true })).not.toBeVisible();
+  // Not just "not visible" — the word is hidden behind Reveal for every
+  // card now, visible or not, so absence has to be checked by whether the
+  // card's <li> exists in the DOM at all.
+  await expect(page.locator("li", { hasText: word })).toHaveCount(0);
 });
 
 test("an anonymous visitor sees a card read-only, with no edit form", async ({ page, browser }) => {

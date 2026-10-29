@@ -22,10 +22,13 @@ test("pasting a list creates every well-formed draft as a card, skipping the res
   await page.getByRole("button", { name: "Create all cards" }).click();
   await expect(page).toHaveURL("/");
 
-  await expect(page.getByText(dogWord, { exact: true })).toBeVisible();
-  await expect(page.getByText(catWord, { exact: true })).toBeVisible();
-  // Only the target word shows on the card list — not the English used to
-  // search for an image.
+  // The word is behind each card's "Reveal" control now (see app.rs's
+  // CardListPage) — hasText checks textContent, not visibility.
+  await expect(page.locator("li", { hasText: dogWord })).toHaveCount(1);
+  await expect(page.locator("li", { hasText: catWord })).toHaveCount(1);
+  // Only the target word is ever stored on the card — not the English
+  // used to search for an image — so it's not on the card list at all,
+  // not even hidden behind Reveal.
   await expect(page.getByText("dog", { exact: true })).not.toBeVisible();
   await expect(page.getByText("cat", { exact: true })).not.toBeVisible();
 });

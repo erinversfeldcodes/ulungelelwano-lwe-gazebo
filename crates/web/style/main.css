@@ -227,6 +227,10 @@ select {
 
 /* --- Card list: a scatter of index cards pulled from the drawer --- */
 
+.card-filters {
+    margin-bottom: 1.5rem;
+}
+
 .card-grid {
     list-style: none;
     margin: 0;
@@ -255,9 +259,11 @@ select {
     z-index: 1;
 }
 
-/* Thumbnails are a small accent, not the card's focus — target_text is.
-   max-height keeps a tall/portrait image or a 16:9 YouTube embed from
-   dominating the card the way a full-width thumbnail used to. */
+/* Thumbnails are a small accent, not the card's focus — the prompt is
+   (media where there is any, "Reveal" otherwise; target_text is always
+   the answer, see .card-grid li details below). max-height keeps a
+   tall/portrait image or a 16:9 YouTube embed from dominating the card
+   the way a full-width thumbnail used to. */
 .card-grid li img,
 .card-grid li iframe,
 .card-grid li video {
@@ -280,11 +286,25 @@ select {
     margin-top: 0.6rem;
 }
 
+.card-grid li details {
+    margin-top: 0.2rem;
+}
+
+.card-grid li details summary {
+    cursor: pointer;
+    font-family: var(--font-serif);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--rule-red);
+}
+
 .card-grid li span {
     font-family: var(--font-type);
     font-size: 1.05rem;
     color: var(--ink);
     display: inline-block;
+    margin-top: 0.4rem;
     border-bottom: 1px solid color-mix(in srgb, var(--rule-red) 55%, transparent);
     padding-bottom: 0.3rem;
 }
