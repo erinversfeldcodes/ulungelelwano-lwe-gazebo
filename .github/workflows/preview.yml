@@ -91,6 +91,51 @@ jobs:
           echo "::error::preview/pr-${{ github.event.number }} never became connectable with its rotated credentials"
           exit 1
 
+  # Confirmed via Neon's own operations log, twice now: the branch's compute
+  # suspends on its idle timeout (~5 minutes, and Free-plan projects can't
+  # change that — see the now-removed attempt to via the endpoint API) well
+  # before `deploy-preview` finishes building and deploying, and the very
+  # first connection after that suspend fails outright on "password
+  # authentication failed" — not a brief blip: a 6-attempt, 30-second retry
+  # loop in the app itself (see main.rs::connect_with_retry) still exhausted
+  # every attempt against it. No start_compute operation is ever recorded
+  # for those failed attempts either, meaning Neon's proxy rejects them on a
+  # stale cached credential before ever waking the compute. Since we can't
+  # disable scale-to-zero, the only lever left is never letting it go idle
+  # long enough to suspend in the first place.
+  #
+  # A background loop inside a `deploy-preview` step was tried first and
+  # didn't work — confirmed by Neon's operations log still showing a suspend
+  # exactly 5 minutes after the branch was set up, meaning the backgrounded
+  # process never actually kept pinging (a step's background job isn't
+  # reliably guaranteed to outlive that step the way a single long-running
+  # foreground process launched with `&` and left running for the rest of
+  # the *job* is — see ci.yml's own `./target/debug/web &` pattern, which
+  # works because nothing in that job ever stops depending on it). A
+  # dedicated job sidesteps the question entirely: it just loops in the
+  # foreground for its own runner's whole lifetime, running concurrently
+  # with `deploy-preview` (both start as soon as `neon-branch` finishes)
+  # rather than as a step competing with that job's own step boundaries.
+  keep-neon-branch-awake:
+    name: Keep Neon preview branch awake during Fly deploy
+    if: github.event.action != 'closed'
+    needs: neon-branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Ping every 60s for 15 minutes — comfortably longer than deploy-preview ever takes
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          url="postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require"
+          for i in $(seq 1 15); do
+            if psql "$url" -c "select 1" >/dev/null 2>&1; then
+              echo "ping $i: ok"
+            else
+              echo "ping $i: failed"
+            fi
+            sleep 60
+          done
+
   deploy-preview:
     name: Deploy Fly preview app
     if: github.event.action != 'closed'
@@ -113,28 +158,6 @@ jobs:
         with:
           node-version: 22
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      # Confirmed via Neon's own operations log, twice now: the branch's
-      # compute suspends on its idle timeout (~5 minutes, and Free-plan
-      # projects can't change that — see the now-removed attempt to via
-      # the endpoint API) well before this job's build-and-deploy finishes,
-      # and the very first connection after that suspend fails outright on
-      # "password authentication failed" — not a brief blip: a 6-attempt,
-      # 30-second retry loop in the app itself (see
-      # main.rs::connect_with_retry) still exhausted every attempt against
-      # it. No start_compute operation is ever recorded for those failed
-      # attempts either, meaning Neon's proxy rejects them on a stale
-      # cached credential before ever waking the compute. Since we can't
-      # disable scale-to-zero, the only lever left is never letting it go
-      # idle long enough to suspend in the first place — a background
-      # ping every 60s for the rest of this job keeps it comfortably under
-      # that 5-minute threshold. Started before anything else so it's
-      # already running by the time the build (the slowest part) begins.
-      - name: Keep the Neon branch's compute awake for the rest of this job
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          url="postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require"
-          ( while true; do psql "$url" -c "select 1" >/dev/null 2>&1; sleep 60; done ) &
-          disown
       - name: Fork a per-PR image bucket and scope a key to it
         id: storage
         env:
