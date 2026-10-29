@@ -1108,6 +1108,10 @@ fn DecksPage() -> impl IntoView {
                                     let href = format!("/?deck={}", deck.id);
                                     let deck_id = deck.id;
                                     let name_value = deck.name.clone();
+                                    let peek_card = deck
+                                        .sample_word
+                                        .clone()
+                                        .map(|word| view! { <div class="peek-card">{word}</div> });
                                     let manage = signed_in.then(|| {
                                         let delete_armed = RwSignal::new(false);
                                         view! {
@@ -1126,6 +1130,7 @@ fn DecksPage() -> impl IntoView {
                                     });
                                     view! {
                                         <li>
+                                            {peek_card}
                                             <div class="label-holder"><a href=href>{deck.name}</a></div>
                                             <div class="pull"></div>
                                             {manage}

@@ -249,28 +249,25 @@ select {
     transition: transform 0.15s ease;
 }
 
-.card-grid li:nth-child(odd) {
-    transform: rotate(-0.6deg);
-}
-
-.card-grid li:nth-child(even) {
-    transform: rotate(0.5deg);
-}
-
 .card-grid li:hover {
-    transform: translateY(-3px) rotate(0deg);
+    transform: translateY(-3px);
     box-shadow: 0 8px 18px var(--shadow);
     z-index: 1;
 }
 
+/* Thumbnails are a small accent, not the card's focus — target_text is.
+   max-height keeps a tall/portrait image or a 16:9 YouTube embed from
+   dominating the card the way a full-width thumbnail used to. */
 .card-grid li img,
 .card-grid li iframe,
 .card-grid li video {
     border: 1px solid var(--paper-dark);
-    max-width: 100%;
+    max-width: 55%;
+    max-height: 5rem;
     height: auto;
     align-self: flex-start;
     margin-top: 0.6rem;
+    object-fit: cover;
 }
 
 .card-grid li iframe {
@@ -322,6 +319,7 @@ select {
     flex-direction: column;
     align-items: center;
     gap: 0.6rem;
+    position: relative;
     /* Drawers come toward the viewer on hover (down + slightly larger),
        not up — the opposite direction from .card-grid li's "pick the
        card up off the table" hover, since a drawer slides out of its
@@ -332,6 +330,40 @@ select {
 .deck-cabinet li:hover {
     transform: translateY(6px) scale(1.03);
     box-shadow: 0 12px 20px var(--shadow);
+    z-index: 1;
+}
+
+/* A card from inside the drawer, tucked out of sight behind the label
+   holder until hover lifts it up — the literal "card" the word is
+   written on, distinct from (and in addition to) the drawer itself
+   sliding toward the viewer. */
+.peek-card {
+    position: absolute;
+    top: 0.5rem;
+    left: 50%;
+    width: 78%;
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 1px;
+    box-shadow: 0 3px 6px var(--shadow-soft);
+    padding: 0.35rem 0.5rem;
+    font-family: var(--font-type);
+    font-size: 0.8rem;
+    color: var(--ink);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0;
+    z-index: 0;
+    pointer-events: none;
+    transform: translate(-50%, 0) rotate(-2deg);
+    transition: transform 0.25s ease 0.08s, opacity 0.25s ease 0.08s;
+}
+
+.deck-cabinet li:hover .peek-card {
+    opacity: 1;
+    transform: translate(-50%, -1.1rem) rotate(-2deg);
 }
 
 .deck-cabinet .label-holder {
@@ -342,14 +374,8 @@ select {
     padding: 0.4rem 0.5rem;
     width: 100%;
     text-align: center;
-    /* Slightly delayed relative to the drawer's own hover transition, so
-       the card inside visibly peeks up a beat after the drawer opens. */
-    transition: transform 0.2s ease 0.08s, box-shadow 0.2s ease 0.08s;
-}
-
-.deck-cabinet li:hover .label-holder {
-    transform: translateY(-10px);
-    box-shadow: 0 6px 10px var(--shadow), inset 0 0 4px rgba(0, 0, 0, 0.25);
+    position: relative;
+    z-index: 1;
 }
 
 .deck-cabinet .label-holder a {

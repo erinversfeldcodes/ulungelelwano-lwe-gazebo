@@ -29,6 +29,9 @@ pub struct CardRow {
 pub struct DeckRow {
     pub id: Uuid,
     pub name: String,
+    /// One card's `target_text` from this deck, for the Decks page's
+    /// hover-peek animation — `None` for an empty deck.
+    pub sample_word: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,9 +363,14 @@ pub async fn create_deck(pool: &PgPool, created_by: Uuid, name: &str) -> sqlx::R
 }
 
 pub async fn list_decks(pool: &PgPool) -> sqlx::Result<Vec<DeckRow>> {
-    sqlx::query_as("SELECT id, name FROM decks ORDER BY name")
-        .fetch_all(pool)
-        .await
+    sqlx::query_as(
+        "SELECT d.id, d.name, \
+         (SELECT c.target_text FROM deck_cards dc JOIN cards c ON c.id = dc.card_id \
+          WHERE dc.deck_id = d.id ORDER BY c.created_at LIMIT 1) AS sample_word \
+         FROM decks d ORDER BY d.name",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn rename_deck(pool: &PgPool, deck_id: Uuid, name: &str) -> sqlx::Result<()> {
