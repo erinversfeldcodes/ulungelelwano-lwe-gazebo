@@ -17,11 +17,37 @@ jobs:
       # Not the action's `db_url` output: GitHub's runner silently drops any
       # step/job output shaped like a credentialed URL ("Skip output 'db_url'
       # since it may contain secret" in the logs), so `db_url` always comes
-      # back empty downstream. Host and password individually aren't
-      # URL-shaped and pass through fine — the full connection string is
-      # reassembled inline wherever it's actually needed below.
+      # back empty downstream. `db_host` isn't secret and passes through as
+      # plain text fine.
+      #
+      # `db_password` is deliberately NOT exposed as the raw rotated
+      # password. This is a documented GitHub Actions bug, not a Neon/Fly
+      # issue (see github.com/orgs/community/discussions/25225 — "Combining
+      # job outputs with masking leads to empty output"): a value masked
+      # here with `::add-mask::` and then set as a job output comes back as
+      # an EMPTY STRING when read from another job via
+      # `needs.<job>.outputs.<x>`. An empty password in the connection
+      # string is exactly "password authentication failed", on the very
+      # first attempt, every time — confirmed via Fly's own crash logs and
+      # Neon's operations log showing no suspend/credential event anywhere
+      # near the failures. This was the actual cause of every crash loop
+      # this file's history chased (reset timing, scale-to-zero, retry
+      # windows, keep-alive pings — none of it was ever the real problem).
+      #
+      # `db_password_enc` carries the same password symmetrically encrypted
+      # (openssl, keyed on `secrets.NEON_STAGING_API_KEY` — already
+      # available to every job without going through an output) rather than
+      # just base64-encoded: encoding alone would dodge the masking bug
+      # above (the encoded string won't match the registered mask pattern,
+      # so it survives the trip) but is trivially reversible, and decrypting
+      # a value for the first time in a job means it briefly appears
+      # resolved in that step's own "Run" log preview, before the
+      # in-script `::add-mask::` call even executes — ciphertext there is
+      # harmless, a base64 dump of the real password wouldn't be. Every
+      # consumer decrypts it and re-masks the plaintext locally before use
+      # (see `deploy-preview` and `e2e`).
       db_host: ${{ steps.reset.outputs.host }}
-      db_password: ${{ steps.rotate.outputs.password }}
+      db_password_enc: ${{ steps.rotate.outputs.password_enc }}
     steps:
       - name: Create Neon branch (copy-on-write child of `staging`, never prod)
         id: branch
@@ -72,6 +98,11 @@ jobs:
           password=$(echo "$response" | jq -r '.role.password')
           echo "::add-mask::$password"
           echo "password=$password" >> "$GITHUB_OUTPUT"
+          # See the `db_password_enc` comment on this job's `outputs:` above
+          # for why this leaves encrypted, not as plaintext (or a reversible
+          # encoding of it).
+          encrypted=$(printf '%s' "$password" | openssl enc -aes-256-cbc -a -A -pbkdf2 -iter 100000 -pass env:NEON_API_KEY)
+          echo "password_enc=$encrypted" >> "$GITHUB_OUTPUT"
       # Even a freshly-rotated password isn't necessarily live the instant
       # the API call returns (the response's own `operations` array is
       # Neon's tell that this, too, finishes asynchronously) — so this
@@ -90,51 +121,6 @@ jobs:
           done
           echo "::error::preview/pr-${{ github.event.number }} never became connectable with its rotated credentials"
           exit 1
-
-  # Confirmed via Neon's own operations log, twice now: the branch's compute
-  # suspends on its idle timeout (~5 minutes, and Free-plan projects can't
-  # change that — see the now-removed attempt to via the endpoint API) well
-  # before `deploy-preview` finishes building and deploying, and the very
-  # first connection after that suspend fails outright on "password
-  # authentication failed" — not a brief blip: a 6-attempt, 30-second retry
-  # loop in the app itself (see main.rs::connect_with_retry) still exhausted
-  # every attempt against it. No start_compute operation is ever recorded
-  # for those failed attempts either, meaning Neon's proxy rejects them on a
-  # stale cached credential before ever waking the compute. Since we can't
-  # disable scale-to-zero, the only lever left is never letting it go idle
-  # long enough to suspend in the first place.
-  #
-  # A background loop inside a `deploy-preview` step was tried first and
-  # didn't work — confirmed by Neon's operations log still showing a suspend
-  # exactly 5 minutes after the branch was set up, meaning the backgrounded
-  # process never actually kept pinging (a step's background job isn't
-  # reliably guaranteed to outlive that step the way a single long-running
-  # foreground process launched with `&` and left running for the rest of
-  # the *job* is — see ci.yml's own `./target/debug/web &` pattern, which
-  # works because nothing in that job ever stops depending on it). A
-  # dedicated job sidesteps the question entirely: it just loops in the
-  # foreground for its own runner's whole lifetime, running concurrently
-  # with `deploy-preview` (both start as soon as `neon-branch` finishes)
-  # rather than as a step competing with that job's own step boundaries.
-  keep-neon-branch-awake:
-    name: Keep Neon preview branch awake during Fly deploy
-    if: github.event.action != 'closed'
-    needs: neon-branch
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Ping every 60s for 15 minutes — comfortably longer than deploy-preview ever takes
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          url="postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require"
-          for i in $(seq 1 15); do
-            if psql "$url" -c "select 1" >/dev/null 2>&1; then
-              echo "ping $i: ok"
-            else
-              echo "ping $i: failed"
-            fi
-            sleep 60
-          done
 
   deploy-preview:
     name: Deploy Fly preview app
@@ -158,6 +144,18 @@ jobs:
         with:
           node-version: 22
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      # See the `db_password_enc` comment on `neon-branch`'s `outputs:` —
+      # decrypt and re-mask it locally, in this job, before using it; a
+      # cross-job `needs.*.outputs.*` read of the raw masked password comes
+      # back empty (a documented GitHub Actions bug, not a Neon/Fly issue).
+      - name: Decrypt the Neon DB password for use in this job
+        id: dbpass
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
+        run: |
+          password=$(printf '%s' "${{ needs.neon-branch.outputs.db_password_enc }}" | openssl enc -d -aes-256-cbc -a -A -pbkdf2 -iter 100000 -pass env:NEON_API_KEY)
+          echo "::add-mask::$password"
+          echo "password=$password" >> "$GITHUB_OUTPUT"
       - name: Fork a per-PR image bucket and scope a key to it
         id: storage
         env:
@@ -199,7 +197,7 @@ jobs:
         with:
           name: gazebo-pr-${{ github.event.number }}
           secrets: >
-            DATABASE_URL=postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
+            DATABASE_URL=postgresql://neondb_owner:${{ steps.dbpass.outputs.password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
             RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
             TEST_EMAIL_RECIPIENT=${{ vars.TEST_EMAIL_RECIPIENT }}
             APP_BASE_URL=https://gazebo-pr-${{ github.event.number }}.fly.dev
@@ -267,10 +265,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BASE_URL: https://gazebo-pr-${{ github.event.number }}.fly.dev
-      # The preview's own Neon branch — auth.setup.ts connects to it
-      # directly (same as it does against local Postgres) to clear the
-      # test account's daily new-card limit after signing in.
-      DATABASE_URL: postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
     steps:
       # See the matching comment in `deploy-preview` above — same stale-ref
       # risk on a re-run, pinned the same way.
@@ -280,6 +274,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # See the `db_password_enc` comment on `neon-branch`'s `outputs:` —
+      # decrypt and re-mask it locally before use; a cross-job
+      # `needs.*.outputs.*` read of the raw masked password comes back
+      # empty (a documented GitHub Actions bug, not a Neon/Fly issue).
+      # Exported via GITHUB_ENV (not a step output) since DATABASE_URL
+      # needs to reach later steps — the preview's own Neon branch, which
+      # auth.setup.ts connects to directly (same as it does against local
+      # Postgres) to clear the test account's daily new-card limit after
+      # signing in.
+      - name: Decrypt the Neon DB password and set DATABASE_URL
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
+        run: |
+          password=$(printf '%s' "${{ needs.neon-branch.outputs.db_password_enc }}" | openssl enc -d -aes-256-cbc -a -A -pbkdf2 -iter 100000 -pass env:NEON_API_KEY)
+          echo "::add-mask::$password"
+          echo "DATABASE_URL=postgresql://neondb_owner:${password}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require" >> "$GITHUB_ENV"
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@v4
