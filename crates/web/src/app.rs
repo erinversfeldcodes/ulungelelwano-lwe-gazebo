@@ -13,6 +13,8 @@ use crate::cards::{
 use crate::decks::{
     AddCardToDeck, CreateDeck, DeleteDeck, RemoveCardFromDeck, RenameDeck, list_decks,
 };
+use crate::dictionary::get_word_definition;
+use crate::dictionary_ui::{ClickableWord, DictionaryDetailsEditor};
 use crate::media_recorder::RecordButton;
 use leptos::html;
 use leptos::prelude::*;
@@ -441,6 +443,7 @@ fn NewCardPage() -> impl IntoView {
     let audio_input: NodeRef<html::Input> = NodeRef::new();
     let video_input: NodeRef<html::Input> = NodeRef::new();
     let chosen_image_url: RwSignal<Option<String>> = RwSignal::new(None);
+    let target_text_signal: RwSignal<String> = RwSignal::new(String::new());
 
     view! {
         <h1>"Add a card"</h1>
@@ -476,7 +479,14 @@ fn NewCardPage() -> impl IntoView {
                                 placeholder="https://www.youtube.com/watch?v=..."
                             />
                         </label>
-                        <label>"Target-language word/phrase" <input type="text" name="target_text" /></label>
+                        <label>
+                            "Target-language word/phrase"
+                            <input
+                                type="text"
+                                name="target_text"
+                                on:input=move |ev| target_text_signal.set(event_target_value(&ev))
+                            />
+                        </label>
                         <label>"Tags (comma separated)" <input type="text" name="tags" /></label>
                         <label>
                             <input type="checkbox" name="two_way" />
@@ -484,6 +494,7 @@ fn NewCardPage() -> impl IntoView {
                         </label>
                         <button type="submit">"Add"</button>
                     </form>
+                    <DictionaryDetailsEditor target_text=target_text_signal.into() />
                 }
                 .into_any()
             })}
@@ -705,9 +716,53 @@ fn EditCardPage() -> impl IntoView {
                             let target_text = detail.target_text.clone();
                             let tags_display = detail.tags.join(", ");
                             view! {
-                                <p>{target_text}</p>
+                                <p><ClickableWord text=target_text /></p>
                                 {(!detail.tags.is_empty())
                                     .then(|| view! { <p>"Tags: " {tags_display}</p> })}
+                            }
+                        });
+                        // Tracks the input's *current* value reactively, so
+                        // the "Dictionary details" editor below always saves
+                        // against whatever's actually typed — including a
+                        // just-edited rename not yet submitted — rather than
+                        // the stale value this page loaded with.
+                        let target_text_signal = RwSignal::new(detail.target_text.clone());
+                        let existing_definition = get_word_definition(detail.target_text.clone())
+                            .await
+                            .ok()
+                            .flatten();
+                        let dictionary_editor = signed_in.then(|| {
+                            let first_example = existing_definition
+                                .as_ref()
+                                .and_then(|d| d.examples.first());
+                            view! {
+                                <DictionaryDetailsEditor
+                                    target_text=target_text_signal.into()
+                                    part_of_speech_initial=existing_definition
+                                        .as_ref()
+                                        .and_then(|d| d.part_of_speech.clone())
+                                        .unwrap_or_default()
+                                    notes_initial=existing_definition
+                                        .as_ref()
+                                        .and_then(|d| d.notes.clone())
+                                        .unwrap_or_default()
+                                    example_target_initial=first_example
+                                        .map(|e| e.target_sentence.clone())
+                                        .unwrap_or_default()
+                                    example_gloss_initial=first_example
+                                        .and_then(|e| e.gloss_sentence.clone())
+                                        .unwrap_or_default()
+                                    linked_words_initial=existing_definition
+                                        .as_ref()
+                                        .map(|d| {
+                                            d.linked_words
+                                                .iter()
+                                                .map(|l| l.target_text.clone())
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        })
+                                        .unwrap_or_default()
+                                />
                             }
                         });
                         let edit_form = signed_in.then(|| {
@@ -776,7 +831,12 @@ fn EditCardPage() -> impl IntoView {
                                     {remove_youtube}
                                     <label>
                                         "Target-language word/phrase"
-                                        <input type="text" name="target_text" value=detail.target_text.clone() />
+                                        <input
+                                            type="text"
+                                            name="target_text"
+                                            value=detail.target_text.clone()
+                                            on:input=move |ev| target_text_signal.set(event_target_value(&ev))
+                                        />
                                     </label>
                                     <label>"Tags (comma separated)" <input type="text" name="tags" value=tags_value /></label>
                                     <label>
@@ -860,6 +920,7 @@ fn EditCardPage() -> impl IntoView {
                                 {read_only_info}
                             </div>
                             {edit_form}
+                            {dictionary_editor}
                             {deck_section}
                             {delete_form}
                             {sign_in_prompt}
@@ -1032,12 +1093,12 @@ fn ReviewPage() -> impl IntoView {
                                         {media_view}
                                         <details>
                                             <summary>"Reveal"</summary>
-                                            <p>{card.target_text}</p>
+                                            <p><ClickableWord text=card.target_text /></p>
                                         </details>
                                     }
                                     .into_any(),
                                     DirectionInput::Reverse => view! {
-                                        <p>{card.target_text}</p>
+                                        <p><ClickableWord text=card.target_text /></p>
                                         <details>
                                             <summary>"Reveal"</summary>
                                             {media_view}
@@ -1105,10 +1166,13 @@ fn StatsPage() -> impl IntoView {
                                     {s.hardest_cards
                                         .into_iter()
                                         .map(|c| {
+                                            let href = format!("/cards/{}", c.id);
                                             view! {
                                                 <li>
-                                                    {c.target_text} " — " {c.lapses} " lapses, difficulty "
-                                                    {format!("{:.2}", c.difficulty)}
+                                                    <A href=href>
+                                                        {c.target_text} " — " {c.lapses} " lapses, difficulty "
+                                                        {format!("{:.2}", c.difficulty)}
+                                                    </A>
                                                 </li>
                                             }
                                         })

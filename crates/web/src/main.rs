@@ -246,7 +246,9 @@ async fn parse_card_multipart(
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
-            "target_text" => fields.target_text = field.text().await.unwrap_or_default(),
+            "target_text" => {
+                fields.target_text = field.text().await.unwrap_or_default().trim().to_string();
+            }
             "tags" => fields.tags_raw = field.text().await.unwrap_or_default(),
             // A checkbox only appears in the multipart body at all when
             // checked, so this field's mere presence means true.

@@ -97,7 +97,18 @@ jobs:
     needs: neon-branch
     runs-on: ubuntu-latest
     steps:
+      # Explicit ref, not actions/checkout's default `github.sha`: for a
+      # `pull_request` event that default is the ephemeral `refs/pull/N/merge`
+      # commit, which GitHub freezes at the moment a run is first *created*
+      # and never re-resolves on a re-run — re-running a stale/failed run
+      # (rather than letting a fresh push trigger a new one) can silently
+      # redeploy an old commit while every run/PR status still points at the
+      # current head. Confirmed happening: a re-run deployed a build whose
+      # baked-in GH_SHA was a merge of a commit several pushes behind the
+      # PR's actual head.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -216,7 +227,11 @@ jobs:
       # test account's daily new-card limit after signing in.
       DATABASE_URL: postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
     steps:
+      # See the matching comment in `deploy-preview` above — same stale-ref
+      # risk on a re-run, pinned the same way.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -259,7 +274,11 @@ jobs:
     if: github.event.action == 'closed'
     runs-on: ubuntu-latest
     steps:
+      # See the matching comment in `deploy-preview` above — same stale-ref
+      # risk on a re-run, pinned the same way.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
