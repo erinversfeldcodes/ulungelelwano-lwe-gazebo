@@ -48,6 +48,32 @@ jobs:
           branch: preview/pr-${{ github.event.number }}
           parent: true
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+      # Confirmed via Neon's own operations log (list_operations): the
+      # branch's compute suspends on its own idle timeout (default 5
+      # minutes) in the gap between this job finishing and the Fly app
+      # actually issuing its first real connection — building + deploying
+      # the image alone takes several minutes, well past that. The very
+      # first connection attempt after that suspend then fails with
+      # "password authentication failed", even though nothing about the
+      # password itself changed — and crucially, no start_compute operation
+      # is ever recorded for those failed attempts, meaning Neon's
+      # connection proxy is rejecting them on some auth cache that didn't
+      # carry over the suspend, before ever waking the compute. Disabling
+      # scale-to-zero for this branch's compute sidesteps the whole class of
+      # problem; it's not an open-ended cost since "Tear down" deletes the
+      # branch (and its compute with it) once the PR closes.
+      - name: Keep the branch's compute from suspending mid-deploy
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
+        run: |
+          endpoint_id=$(curl -sf -H "Authorization: Bearer $NEON_API_KEY" \
+            "https://console.neon.tech/api/v2/projects/${{ vars.NEON_STAGING_PROJECT_ID }}/branches/${{ steps.reset.outputs.branch_id }}/endpoints" \
+            | jq -r '.endpoints[0].id')
+          curl -sf -X PATCH \
+            -H "Authorization: Bearer $NEON_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"endpoint":{"suspend_timeout_seconds":-1}}' \
+            "https://console.neon.tech/api/v2/projects/${{ vars.NEON_STAGING_PROJECT_ID }}/endpoints/$endpoint_id" >/dev/null
       # reset-branch-action's own password output is read back from
       # whatever Neon's control plane has *stored* for this branch's role
       # — but confirmed in practice: it can disagree with the password
