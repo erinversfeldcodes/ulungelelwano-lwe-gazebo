@@ -21,7 +21,7 @@ jobs:
       # URL-shaped and pass through fine — the full connection string is
       # reassembled inline wherever it's actually needed below.
       db_host: ${{ steps.reset.outputs.host }}
-      db_password: ${{ steps.reset.outputs.password }}
+      db_password: ${{ steps.rotate.outputs.password }}
     steps:
       - name: Create Neon branch (copy-on-write child of `staging`, never prod)
         id: branch
@@ -48,30 +48,47 @@ jobs:
           branch: preview/pr-${{ github.event.number }}
           parent: true
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-      # reset-branch-action fetches this host/password immediately after
-      # the reset call returns, but under the hood a reset is actually a
-      # swap-in-new-timeline-and-delete-the-old-one — and the branch's
-      # compute doesn't necessarily converge onto that swapped state
-      # instantly. Confirmed via Neon's own operation history: on one
-      # reset, the swap's own operations reported "finished" nearly 100s
-      # before Neon's post-reset check_availability operation even
-      # started. Handing Fly a password before that convergence completes
-      # is exactly what made every preview deploy crash-loop on "password
-      # authentication failed" — so don't trust the action's output until
-      # a real connection with it actually succeeds.
-      - name: Wait until the reset branch's credentials actually work
+      # reset-branch-action's own password output is read back from
+      # whatever Neon's control plane has *stored* for this branch's role
+      # — but confirmed in practice: it can disagree with the password
+      # actually live on the reset branch's data (a reset swaps in a
+      # whole copy of staging's storage, and that stored-password
+      # bookkeeping isn't guaranteed to follow). Verified this the hard
+      # way: a password that connected fine immediately after reset still
+      # left every subsequent Fly deploy crash-looping on "password
+      # authentication failed" once the branch's compute had cycled
+      # (idled, suspended, and resumed). Explicitly resetting the role's
+      # password via Neon's own API — rather than trusting a read of
+      # whatever it currently has on file — is the one operation Neon
+      # guarantees produces a password that's actually, durably correct.
+      - name: Rotate neondb_owner's password to one guaranteed correct for the reset branch
+        id: rotate
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
+        run: |
+          response=$(curl -sf -X POST \
+            -H "Authorization: Bearer $NEON_API_KEY" \
+            "https://console.neon.tech/api/v2/projects/${{ vars.NEON_STAGING_PROJECT_ID }}/branches/${{ steps.reset.outputs.branch_id }}/roles/neondb_owner/reset_password")
+          password=$(echo "$response" | jq -r '.role.password')
+          echo "::add-mask::$password"
+          echo "password=$password" >> "$GITHUB_OUTPUT"
+      # Even a freshly-rotated password isn't necessarily live the instant
+      # the API call returns (the response's own `operations` array is
+      # Neon's tell that this, too, finishes asynchronously) — so this
+      # still doesn't trust it blindly before handing it to Fly.
+      - name: Wait until the rotated password actually works
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          url="postgresql://neondb_owner:${{ steps.reset.outputs.password }}@${{ steps.reset.outputs.host }}/neondb?sslmode=require"
+          url="postgresql://neondb_owner:${{ steps.rotate.outputs.password }}@${{ steps.reset.outputs.host }}/neondb?sslmode=require"
           for attempt in $(seq 1 30); do
             if psql "$url" -c "select 1" >/dev/null 2>&1; then
-              echo "branch credentials are live (attempt $attempt)"
+              echo "rotated credentials are live (attempt $attempt)"
               exit 0
             fi
             echo "attempt $attempt: branch not ready yet, retrying in 10s..."
             sleep 10
           done
-          echo "::error::preview/pr-${{ github.event.number }} never became connectable with its post-reset credentials"
+          echo "::error::preview/pr-${{ github.event.number }} never became connectable with its rotated credentials"
           exit 1
 
   deploy-preview:

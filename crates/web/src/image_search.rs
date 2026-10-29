@@ -31,6 +31,18 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 fn new_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        // reqwest sends no User-Agent at all unless one is set explicitly.
+        // Pixabay's own API domain tolerates that, but fetch_by_id's
+        // second request — a direct GET against the CDN host
+        // `largeImageURL` actually points to, not pixabay.com/api/ —
+        // doesn't: without a User-Agent it comes back 200 with a
+        // text/plain body instead of the image, which fetch_by_id then
+        // (correctly) refuses to treat as one.
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .build()
         .expect("building the image-search HTTP client should never fail")
 }
