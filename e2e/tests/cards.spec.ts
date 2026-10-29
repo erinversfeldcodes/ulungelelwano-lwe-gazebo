@@ -95,6 +95,13 @@ test("an anonymous visitor sees a card read-only, with no edit form", async ({ p
   const anonPage = await anonContext.newPage();
   try {
     await anonPage.goto(absoluteCardUrl);
+    // Browsing a card to self-test is open to anyone, in the same
+    // reveal-then-show shape as the review queue — but there must be no
+    // way to grade it, since grading is what writes to the Anki-derived
+    // SRS state and that requires an account.
+    await expect(anonPage.getByText(word, { exact: true })).not.toBeVisible();
+    await expect(anonPage.locator(".review-grades")).toHaveCount(0);
+    await anonPage.getByText("Reveal").click();
     await expect(anonPage.getByText(word, { exact: true })).toBeVisible();
     await expect(anonPage.getByLabel("Target-language word/phrase")).not.toBeVisible();
     await expect(anonPage.getByRole("button", { name: "Delete card" })).not.toBeVisible();
