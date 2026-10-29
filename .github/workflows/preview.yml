@@ -198,6 +198,7 @@ jobs:
           name: gazebo-pr-${{ github.event.number }}
           secrets: >
             DATABASE_URL=postgresql://neondb_owner:${{ steps.dbpass.outputs.password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require
+            PIXABAY_API_KEY=${{ secrets.PIXABAY_API_KEY }}
             RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
             TEST_EMAIL_RECIPIENT=${{ vars.TEST_EMAIL_RECIPIENT }}
             APP_BASE_URL=https://gazebo-pr-${{ github.event.number }}.fly.dev
