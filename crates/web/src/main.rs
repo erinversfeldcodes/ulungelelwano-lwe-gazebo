@@ -296,26 +296,69 @@ fn parse_tags(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Percent-encodes `s` for safe embedding as one query-string value in a
+/// `Location` redirect header — just enough for a round trip through
+/// `leptos_router`'s `use_query_map()` on the other end (which decodes it
+/// back automatically, same as any URL query string), not a
+/// general-purpose encoder.
+#[cfg(feature = "ssr")]
+fn percent_encode_query_value(s: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// A redirect back to `path` carrying `message` as a `?error=` query param.
+/// `NewCardPage`/`BulkAddPage`/`EditCardPage` read it back and render it
+/// with the same `"Error: "` paragraph every other form in the app already
+/// uses — replaces this file's previous bare `(StatusCode, String)`
+/// responses, which rendered as unstyled plain text outside the whole app
+/// shell (no nav, no theme) on exactly the three pages most likely to hit
+/// a real validation/upload failure.
+#[cfg(feature = "ssr")]
+fn error_redirect(path: &str, message: &str) -> axum::response::Redirect {
+    axum::response::Redirect::to(&format!(
+        "{path}?error={}",
+        percent_encode_query_value(message)
+    ))
+}
+
 /// Plain multipart form POST, not a Leptos server function — file uploads
 /// need `multipart/form-data`, which is far simpler to handle as an
 /// ordinary Axum route (a classic full-page form submit) than to wire
-/// through Leptos's server-action/WASM machinery.
+/// through Leptos's server-action/WASM machinery. Always redirects rather
+/// than returning an error response directly (see `error_redirect`) so a
+/// failure still lands the user back inside the styled app, not on a bare
+/// status-code page.
 #[cfg(feature = "ssr")]
 async fn cards_new(
     axum::extract::State(state): axum::extract::State<AppState>,
     cookies: tower_cookies::Cookies,
     mut multipart: axum::extract::Multipart,
-) -> Result<axum::response::Redirect, (axum::http::StatusCode, String)> {
-    let user = web::auth::current_user(&state.db_pool, &cookies)
-        .await
-        .ok_or((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "not signed in".to_string(),
-        ))?;
+) -> axum::response::Redirect {
+    let Some(user) = web::auth::current_user(&state.db_pool, &cookies).await else {
+        // Can only happen bypassing the UI entirely — NewCardPage itself
+        // already redirects here when signed out.
+        return axum::response::Redirect::to("/login");
+    };
 
-    let fields = parse_card_multipart(&state, &mut multipart).await?;
+    let fields = match parse_card_multipart(&state, &mut multipart).await {
+        Ok(fields) => fields,
+        Err((_, message)) => return error_redirect("/new", &message),
+    };
 
-    web::db::create_card(
+    let result = web::db::create_card(
         &state.db_pool,
         user.id,
         web::db::NewCard {
@@ -328,10 +371,12 @@ async fn cards_new(
         },
         &parse_tags(&fields.tags_raw),
     )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .await;
+    if let Err(e) = result {
+        return error_redirect("/new", &e.to_string());
+    }
 
-    Ok(axum::response::Redirect::to("/"))
+    axum::response::Redirect::to("/")
 }
 
 /// One parsed-and-ready-to-create entry from the bulk-add page — a target
@@ -412,18 +457,18 @@ async fn cards_bulk(
     axum::extract::State(state): axum::extract::State<AppState>,
     cookies: tower_cookies::Cookies,
     mut multipart: axum::extract::Multipart,
-) -> Result<axum::response::Redirect, (axum::http::StatusCode, String)> {
-    let user = web::auth::current_user(&state.db_pool, &cookies)
-        .await
-        .ok_or((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "not signed in".to_string(),
-        ))?;
+) -> axum::response::Redirect {
+    let Some(user) = web::auth::current_user(&state.db_pool, &cookies).await else {
+        return axum::response::Redirect::to("/login");
+    };
 
-    let drafts = parse_bulk_multipart(&state, &mut multipart).await?;
+    let drafts = match parse_bulk_multipart(&state, &mut multipart).await {
+        Ok(drafts) => drafts,
+        Err((_, message)) => return error_redirect("/bulk-add", &message),
+    };
 
     for draft in drafts {
-        web::db::create_card(
+        let result = web::db::create_card(
             &state.db_pool,
             user.id,
             web::db::NewCard {
@@ -433,11 +478,13 @@ async fn cards_bulk(
             },
             &[],
         )
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .await;
+        if let Err(e) = result {
+            return error_redirect("/bulk-add", &e.to_string());
+        }
     }
 
-    Ok(axum::response::Redirect::to("/"))
+    axum::response::Redirect::to("/")
 }
 
 #[cfg(feature = "ssr")]
@@ -446,23 +493,25 @@ async fn cards_update(
     cookies: tower_cookies::Cookies,
     axum::extract::Path(card_id): axum::extract::Path<uuid::Uuid>,
     mut multipart: axum::extract::Multipart,
-) -> Result<axum::response::Redirect, (axum::http::StatusCode, String)> {
-    web::auth::current_user(&state.db_pool, &cookies)
+) -> axum::response::Redirect {
+    if web::auth::current_user(&state.db_pool, &cookies)
         .await
-        .ok_or((
-            axum::http::StatusCode::UNAUTHORIZED,
-            "not signed in".to_string(),
-        ))?;
+        .is_none()
+    {
+        return axum::response::Redirect::to("/login");
+    }
 
-    let existing = web::db::get_card(&state.db_pool, card_id)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((
-            axum::http::StatusCode::NOT_FOUND,
-            "card not found".to_string(),
-        ))?;
+    let edit_page = format!("/cards/{card_id}");
+    // EditCardPage's own fetch already renders "Card not found."/
+    // "Error: ..." for either case — no need to repeat it via ?error=.
+    let Ok(Some(existing)) = web::db::get_card(&state.db_pool, card_id).await else {
+        return axum::response::Redirect::to(&edit_page);
+    };
 
-    let fields = parse_card_multipart(&state, &mut multipart).await?;
+    let fields = match parse_card_multipart(&state, &mut multipart).await {
+        Ok(fields) => fields,
+        Err((_, message)) => return error_redirect(&edit_page, &message),
+    };
     // A new upload wins over a remove request (see CardFormFields); a
     // remove request wins over keeping the existing value; otherwise the
     // existing value is kept as-is.
@@ -495,7 +544,7 @@ async fn cards_update(
         }
     });
 
-    web::db::update_card(
+    let result = web::db::update_card(
         &state.db_pool,
         card_id,
         web::db::NewCard {
@@ -508,10 +557,12 @@ async fn cards_update(
         },
         &parse_tags(&fields.tags_raw),
     )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .await;
+    if let Err(e) = result {
+        return error_redirect(&edit_page, &e.to_string());
+    }
 
-    Ok(axum::response::Redirect::to(&format!("/cards/{card_id}")))
+    axum::response::Redirect::to(&edit_page)
 }
 
 /// Axum's default multipart body limit (2MB) comfortably fits an image
@@ -632,7 +683,7 @@ fn main() {}
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
-    use super::youtube_embed_url;
+    use super::{percent_encode_query_value, youtube_embed_url};
 
     #[test]
     fn accepts_a_watch_url() {
@@ -687,5 +738,25 @@ mod tests {
     #[test]
     fn rejects_plain_text_that_is_not_a_url_at_all() {
         assert!(youtube_embed_url("not a url").is_err());
+    }
+
+    #[test]
+    fn percent_encode_leaves_unreserved_characters_alone() {
+        assert_eq!(percent_encode_query_value("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
+    }
+
+    #[test]
+    fn percent_encode_escapes_spaces_and_url_reserved_characters() {
+        assert_eq!(
+            percent_encode_query_value("that doesn't look like a YouTube video link"),
+            "that%20doesn%27t%20look%20like%20a%20YouTube%20video%20link"
+        );
+        assert_eq!(percent_encode_query_value("a&b=c#d%e"), "a%26b%3Dc%23d%25e");
+    }
+
+    #[test]
+    fn percent_encode_escapes_multi_byte_utf8_one_byte_at_a_time() {
+        // "é" is the two-byte UTF-8 sequence 0xC3 0xA9.
+        assert_eq!(percent_encode_query_value("café"), "caf%C3%A9");
     }
 }

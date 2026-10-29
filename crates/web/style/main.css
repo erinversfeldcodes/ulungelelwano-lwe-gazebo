@@ -71,11 +71,19 @@ nav a {
     color: var(--paper);
     text-decoration: none;
     font-weight: bold;
+    border-bottom: 2px solid transparent;
+    padding-bottom: 2px;
 }
 
 nav a:hover {
     color: var(--brass-bright);
     text-decoration: underline;
+}
+
+/* Set automatically by <A> on whichever link matches the current route. */
+nav a[aria-current="page"] {
+    color: var(--brass-bright);
+    border-bottom-color: var(--brass-bright);
 }
 
 main {
@@ -102,6 +110,13 @@ p, label, .word-display {
     color: var(--paper-aged);
 }
 
+.page-intro {
+    font-style: italic;
+    opacity: 0.85;
+    margin-top: -0.4rem;
+    margin-bottom: 1.2rem;
+}
+
 /* --- Forms: filling out a card by hand, on a paper surface --- */
 
 form {
@@ -113,7 +128,8 @@ form {
     max-width: 32rem;
 }
 
-form label {
+form label,
+.card-section label {
     display: block;
     color: var(--ink-faded);
     font-size: 0.85rem;
@@ -122,10 +138,16 @@ form label {
     margin-bottom: 0.8rem;
 }
 
+/* .card-section isn't nested in a <form> — it's a standalone paper-surface
+   block for form-adjacent content that saves independently of the card
+   form it sits beside (dictionary details, deck assignment), so its own
+   text input needs the same treatment named explicitly. */
 form input[type="text"],
 form input[type="email"],
 form input[type="number"],
-form input[type="file"] {
+form input[type="password"],
+form input[type="file"],
+.card-section input[type="text"] {
     display: block;
     width: 100%;
     font-family: var(--font-type);
@@ -138,9 +160,34 @@ form input[type="file"] {
     margin-top: 0.3rem;
 }
 
-form input:focus {
+form input:focus,
+.card-section input:focus {
     outline: none;
     border-bottom: 2px solid var(--rule-red);
+}
+
+/* Unscoped, unlike the inputs above: BulkAddPage's textarea sits directly
+   on the dark page background, before its <form> even opens (the form only
+   wraps the per-draft fields and submit button) — it needs its own paper
+   surface rather than relying on a form/.card-section ancestor to supply
+   one, since --ink text is unreadable straight on --wall-dark. */
+textarea {
+    display: block;
+    width: 100%;
+    font-family: var(--font-type);
+    font-size: 1rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 2px;
+    padding: 0.5rem 0.6rem;
+    margin-top: 0.3rem;
+    resize: vertical;
+}
+
+textarea:focus {
+    outline: none;
+    border-color: var(--rule-red);
 }
 
 button,
@@ -161,6 +208,13 @@ input[type="submit"] {
 button:hover {
     background: linear-gradient(var(--wood-medium), var(--wood-dark));
     border-color: var(--brass);
+}
+
+/* The second-click state of a `confirm_button`-rendered delete control
+   (see app.rs) — a brief red warning rather than a modal dialog. */
+button.armed {
+    background: linear-gradient(var(--rule-red), var(--wood-dark));
+    border-color: var(--rule-red);
 }
 
 select {
@@ -466,7 +520,51 @@ select {
     float: right;
 }
 
-.dictionary-details summary {
-    cursor: pointer;
+/* A paper-surface block for form-adjacent content that saves independently
+   of the card form it sits beside — dictionary details and deck
+   assignment on EditCardPage, currently. Its own background rather than
+   just a text-color fix on its heading: this sits directly on the dark
+   page background, so --rule-red (fine against .review-card's cream
+   background elsewhere) was nearly invisible without it. */
+.card-section {
+    background: var(--paper);
+    border: 1px solid var(--paper-dark);
+    border-radius: 2px;
+    box-shadow: 0 3px 10px var(--shadow-soft);
+    padding: 0.9rem 1.1rem;
+    max-width: 32rem;
+    margin-top: 1rem;
+}
+
+.card-section-heading {
     color: var(--rule-red);
+    font-family: var(--font-serif);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 0.8rem;
+}
+
+/* --- Narrow viewports: the grids (.card-grid, .deck-cabinet) already
+   collapse on their own via auto-fill/minmax, and form/.ledger/.review-card
+   are max-width (not width), so they already shrink to fit. What's left is
+   the nav — nine uppercase, letter-spaced items with no wrap handling —
+   and main's fixed side padding eating more of a phone-width viewport than
+   it should. --- */
+@media (max-width: 640px) {
+    nav {
+        padding: 0.7rem 1rem;
+        font-size: 0.8rem;
+        letter-spacing: 0.03em;
+        line-height: 1.9;
+    }
+
+    main {
+        margin-top: 1.4rem;
+        padding: 0 1rem;
+    }
+
+    h1 {
+        font-size: 1.5rem;
+    }
 }

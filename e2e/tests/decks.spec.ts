@@ -86,7 +86,11 @@ test("deleting a deck removes it from the list", async ({ page }) => {
   await page.getByRole("button", { name: "Create" }).click();
   await expect(page.getByRole("link", { name: deckName })).toBeVisible();
 
-  await page.locator("li", { hasText: deckName }).getByRole("button", { name: "Delete" }).click();
+  // Delete requires an arming click before the confirming one — see
+  // app.rs's confirm_button.
+  const row = page.locator("li", { hasText: deckName });
+  await row.getByRole("button", { name: "Delete" }).click();
+  await row.getByRole("button", { name: "Confirm delete?" }).click();
 
   await expect(page.getByRole("link", { name: deckName })).not.toBeVisible();
 });

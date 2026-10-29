@@ -56,7 +56,10 @@ test("deleting a card removes it from the list", async ({ page }) => {
   await expect(page).toHaveURL("/");
 
   await page.locator("li", { hasText: word }).getByRole("link", { name: "Edit" }).click();
+  // Delete requires an arming click before the confirming one — see
+  // app.rs's confirm_button.
   await page.getByRole("button", { name: "Delete card" }).click();
+  await page.getByRole("button", { name: "Confirm delete?" }).click();
 
   await expect(page).toHaveURL("/");
   await expect(page.getByText(word, { exact: true })).not.toBeVisible();

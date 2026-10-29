@@ -37,6 +37,47 @@ fn youtube_embed(url: String) -> impl IntoView {
     view! { <iframe src=url width="560" height="315" allowfullscreen=true></iframe> }
 }
 
+/// Renders a `?error=` query param — left by main.rs's raw multipart POST
+/// handlers (`cards_new`/`cards_bulk`/`cards_update`) on a failed
+/// submission, see `error_redirect` there — with the same `"Error: "`
+/// paragraph every `ActionForm`-based error in this file already uses. A
+/// plain, one-time read rather than a reactive signal: these pages are
+/// only ever reached with `?error=` set via a fresh full-page redirect
+/// (never a client-side route change), so there's nothing for it to react
+/// to after mount.
+fn form_error_banner() -> impl IntoView {
+    let query = use_query_map();
+    query
+        .get_untracked()
+        .get("error")
+        .map(|message| view! { <p>"Error: " {message}</p> })
+}
+
+/// A submit button for a destructive `ActionForm` that requires two clicks:
+/// the first arms it (relabeling to "Confirm delete?" for a few seconds)
+/// without submitting, the second lets the click proceed as a normal submit.
+/// Avoids pulling in a modal/dialog for a single low-frequency action that's
+/// already behind its own form; `armed` must be a signal local to this one
+/// button (a fresh `RwSignal::new(false)` per call site, or per loop
+/// iteration for a repeated button like one delete-per-row).
+fn confirm_button(label: &'static str, armed: RwSignal<bool>) -> impl IntoView {
+    view! {
+        <button
+            type="submit"
+            class:armed=armed
+            on:click=move |ev| {
+                if !armed.get_untracked() {
+                    ev.prevent_default();
+                    armed.set(true);
+                    set_timeout(move || armed.set(false), std::time::Duration::from_secs(4));
+                }
+            }
+        >
+            {move || if armed.get() { "Confirm delete?" } else { label }}
+        </button>
+    }
+}
+
 /// Search-and-pick an image for a card's `image_url`, as an alternative to
 /// uploading a file directly. The English text here is deliberately never
 /// part of the submitted card form — it only ever drives
@@ -150,6 +191,82 @@ fn ImageSearchPicker(
     }
 }
 
+/// The image/audio/video/YouTube attachment fields shared by `NewCardPage`
+/// and `EditCardPage` — previously hand-duplicated between the two with
+/// only label wording and the presence of "remove" checkboxes differing.
+/// `editing` switches between "Image file" (create) and "Replace image
+/// (optional)" (edit) wording for all four fields; the `has_*` flags gate
+/// each "Remove X" checkbox, since there's nothing to remove on a brand
+/// new card (NewCardPage never passes `true` for any of them).
+#[component]
+fn MediaAttachmentFields(
+    chosen_image_url: RwSignal<Option<String>>,
+    audio_input: NodeRef<html::Input>,
+    video_input: NodeRef<html::Input>,
+    #[prop(default = false)] editing: bool,
+    #[prop(default = false)] has_image: bool,
+    #[prop(default = false)] has_audio: bool,
+    #[prop(default = false)] has_video: bool,
+    #[prop(default = false)] has_youtube: bool,
+) -> impl IntoView {
+    let image_label = if editing {
+        "Replace image (optional)"
+    } else {
+        "Image file"
+    };
+    let audio_label = if editing {
+        "Replace audio (optional)"
+    } else {
+        "Audio file"
+    };
+    let video_label = if editing {
+        "Replace video (optional)"
+    } else {
+        "Video file"
+    };
+    let youtube_label = if editing {
+        "Replace YouTube link (optional)"
+    } else {
+        "Or link a YouTube video"
+    };
+
+    view! {
+        <label>{image_label} <input type="file" name="image" accept="image/*" /></label>
+        <ImageSearchPicker chosen_image_url=chosen_image_url />
+        {move || {
+            chosen_image_url.get().map(|url| view! {
+                <input type="hidden" name="image_url" value=url />
+            })
+        }}
+        {has_image.then(|| view! {
+            <label><input type="checkbox" name="remove_image" />"Remove image"</label>
+        })}
+        <label>
+            {audio_label}
+            <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
+        </label>
+        <RecordButton kind="audio" target_input=audio_input />
+        {has_audio.then(|| view! {
+            <label><input type="checkbox" name="remove_audio" />"Remove audio"</label>
+        })}
+        <label>
+            {video_label}
+            <input type="file" name="video" accept="video/*" node_ref=video_input />
+        </label>
+        <RecordButton kind="video" target_input=video_input />
+        {has_video.then(|| view! {
+            <label><input type="checkbox" name="remove_video" />"Remove video"</label>
+        })}
+        <label>
+            {youtube_label}
+            <input type="url" name="youtube_url" placeholder="https://www.youtube.com/watch?v=..." />
+        </label>
+        {has_youtube.then(|| view! {
+            <label><input type="checkbox" name="remove_youtube" />"Remove YouTube link"</label>
+        })}
+    }
+}
+
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -179,7 +296,7 @@ pub fn App() -> impl IntoView {
 
         <Router>
             <nav>
-                <A href="/">"Cards"</A>
+                <A href="/" exact=true>"Cards"</A>
                 " · "
                 <A href="/decks">"Decks"</A>
                 <Transition fallback=|| ()>
@@ -203,6 +320,17 @@ pub fn App() -> impl IntoView {
                 </Transition>
             </nav>
             <main>
+                // Two deliberately different auth-gating shapes below, not
+                // an accident of implementation order: a page with no
+                // meaningful signed-out use (NewCardPage, BulkAddPage,
+                // ReviewPage, StatsPage, SettingsPage, AccountPage) hard-
+                // redirects to /login via a `<Redirect>` inside its own
+                // Suspend block. A page with a genuine public read-only
+                // view (CardListPage, EditCardPage, DecksPage — browsing
+                // cards/decks is intentionally open to anyone, per the
+                // shared-card-pool model) instead degrades gracefully: it
+                // renders for everyone, and conditions only the
+                // mutating bits on `signed_in.then(...)`.
                 <Routes fallback=|| "Page not found.">
                     <Route path=StaticSegment("") view=CardListPage/>
                     <Route path=StaticSegment("new") view=NewCardPage/>
@@ -351,8 +479,16 @@ fn ResetPasswordPage() -> impl IntoView {
 
 #[component]
 fn CardListPage() -> impl IntoView {
+    // Seeded from `?deck=<id>` so DecksPage's "go see this deck's cards"
+    // links actually land pre-filtered, not just on an unfiltered list.
+    let query = use_query_map();
     let tag_filter = RwSignal::new(None::<String>);
-    let deck_filter = RwSignal::new(None::<Uuid>);
+    let deck_filter = RwSignal::new(
+        query
+            .get_untracked()
+            .get("deck")
+            .and_then(|id| Uuid::parse_str(&id).ok()),
+    );
 
     let tags = Resource::new(|| (), |()| list_tags());
     let decks = Resource::new(|| (), |()| list_decks());
@@ -366,10 +502,13 @@ fn CardListPage() -> impl IntoView {
         <div>
             <label>
                 "Filter by tag "
-                <select on:change=move |ev| {
-                    let value = event_target_value(&ev);
-                    tag_filter.set(if value.is_empty() { None } else { Some(value) });
-                }>
+                <select
+                    prop:value=move || tag_filter.get().unwrap_or_default()
+                    on:change=move |ev| {
+                        let value = event_target_value(&ev);
+                        tag_filter.set(if value.is_empty() { None } else { Some(value) });
+                    }
+                >
                     <option value="">"All tags"</option>
                     <Transition fallback=|| ()>
                         {move || Suspend::new(async move {
@@ -383,10 +522,15 @@ fn CardListPage() -> impl IntoView {
             " "
             <label>
                 "Filter by deck "
-                <select on:change=move |ev| {
-                    let value = event_target_value(&ev);
-                    deck_filter.set(Uuid::parse_str(&value).ok());
-                }>
+                <select
+                    prop:value=move || {
+                        deck_filter.get().map(|id| id.to_string()).unwrap_or_default()
+                    }
+                    on:change=move |ev| {
+                        let value = event_target_value(&ev);
+                        deck_filter.set(Uuid::parse_str(&value).ok());
+                    }
+                >
                     <option value="">"All decks"</option>
                     <Transition fallback=|| ()>
                         {move || Suspend::new(async move {
@@ -401,7 +545,22 @@ fn CardListPage() -> impl IntoView {
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
                 match cards.await {
-                    Ok(cards) if cards.is_empty() => view! { <p>"No cards match."</p> }.into_any(),
+                    Ok(cards) if cards.is_empty() => {
+                        // Distinguish "nothing matches this filter" from
+                        // "you have zero cards at all" — only the latter
+                        // gets a call to action, since a narrow filter was
+                        // the user's own deliberate choice.
+                        let unfiltered = tag_filter.get_untracked().is_none()
+                            && deck_filter.get_untracked().is_none();
+                        if unfiltered {
+                            view! {
+                                <p>"No cards yet. " <A href="/new">"Add the first one"</A>"."</p>
+                            }
+                            .into_any()
+                        } else {
+                            view! { <p>"No cards match these filters."</p> }.into_any()
+                        }
+                    }
                     Ok(cards) => view! {
                         <ul class="card-grid">
                             {cards
@@ -447,6 +606,7 @@ fn NewCardPage() -> impl IntoView {
 
     view! {
         <h1>"Add a card"</h1>
+        {form_error_banner()}
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
                 if auth.await.ok().flatten().is_none() {
@@ -454,31 +614,11 @@ fn NewCardPage() -> impl IntoView {
                 }
                 view! {
                     <form method="post" action="/cards/new" enctype="multipart/form-data">
-                        <label>"Image file" <input type="file" name="image" accept="image/*" /></label>
-                        <ImageSearchPicker chosen_image_url=chosen_image_url />
-                        {move || {
-                            chosen_image_url.get().map(|url| view! {
-                                <input type="hidden" name="image_url" value=url />
-                            })
-                        }}
-                        <label>
-                            "Audio file"
-                            <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
-                        </label>
-                        <RecordButton kind="audio" target_input=audio_input />
-                        <label>
-                            "Video file"
-                            <input type="file" name="video" accept="video/*" node_ref=video_input />
-                        </label>
-                        <RecordButton kind="video" target_input=video_input />
-                        <label>
-                            "Or link a YouTube video"
-                            <input
-                                type="url"
-                                name="youtube_url"
-                                placeholder="https://www.youtube.com/watch?v=..."
-                            />
-                        </label>
+                        <MediaAttachmentFields
+                            chosen_image_url=chosen_image_url
+                            audio_input=audio_input
+                            video_input=video_input
+                        />
                         <label>
                             "Target-language word/phrase"
                             <input
@@ -567,6 +707,10 @@ fn BulkAddPage() -> impl IntoView {
 
     view! {
         <h1>"Bulk add cards"</h1>
+        <p class="page-intro">
+            "Faster than adding one at a time — paste a whole list, check the parsed results, then create them together."
+        </p>
+        {form_error_banner()}
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
                 if auth.await.ok().flatten().is_none() {
@@ -676,13 +820,17 @@ fn EditCardPage() -> impl IntoView {
 
     let navigate = use_navigate();
     Effect::new(move |_| {
-        if delete.value().get().is_some() {
+        // Was `.is_some()` — true on a *failed* delete too, so the page
+        // navigated away and silently hid the error. Only a real success
+        // should leave this page.
+        if matches!(delete.value().get(), Some(Ok(()))) {
             navigate("/", leptos_router::NavigateOptions::default());
         }
     });
 
     view! {
         <h1>"Card"</h1>
+        {form_error_banner()}
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
                 let Some(id) = card_id() else {
@@ -767,68 +915,18 @@ fn EditCardPage() -> impl IntoView {
                         });
                         let edit_form = signed_in.then(|| {
                             let tags_value = detail.tags.join(", ");
-                            // Only offered when there's actually something
-                            // to remove — a brand-new card (NewCardPage)
-                            // has no "remove" checkboxes at all, since
-                            // nothing's attached yet to remove.
-                            let remove_image = detail.image_url.is_some().then(|| view! {
-                                <label>
-                                    <input type="checkbox" name="remove_image" />
-                                    "Remove image"
-                                </label>
-                            });
-                            let remove_audio = detail.audio_url.is_some().then(|| view! {
-                                <label>
-                                    <input type="checkbox" name="remove_audio" />
-                                    "Remove audio"
-                                </label>
-                            });
-                            let remove_video = detail.video_url.is_some().then(|| view! {
-                                <label>
-                                    <input type="checkbox" name="remove_video" />
-                                    "Remove video"
-                                </label>
-                            });
-                            let remove_youtube = detail.youtube_url.is_some().then(|| view! {
-                                <label>
-                                    <input type="checkbox" name="remove_youtube" />
-                                    "Remove YouTube link"
-                                </label>
-                            });
                             view! {
                                 <form method="post" action=action enctype="multipart/form-data">
-                                    <label>
-                                        "Replace image (optional)"
-                                        <input type="file" name="image" accept="image/*" />
-                                    </label>
-                                    <ImageSearchPicker chosen_image_url=chosen_image_url />
-                                    {move || {
-                                        chosen_image_url.get().map(|url| view! {
-                                            <input type="hidden" name="image_url" value=url />
-                                        })
-                                    }}
-                                    {remove_image}
-                                    <label>
-                                        "Replace audio (optional)"
-                                        <input type="file" name="audio" accept="audio/*" node_ref=audio_input />
-                                    </label>
-                                    <RecordButton kind="audio" target_input=audio_input />
-                                    {remove_audio}
-                                    <label>
-                                        "Replace video (optional)"
-                                        <input type="file" name="video" accept="video/*" node_ref=video_input />
-                                    </label>
-                                    <RecordButton kind="video" target_input=video_input />
-                                    {remove_video}
-                                    <label>
-                                        "Replace YouTube link (optional)"
-                                        <input
-                                            type="url"
-                                            name="youtube_url"
-                                            placeholder="https://www.youtube.com/watch?v=..."
-                                        />
-                                    </label>
-                                    {remove_youtube}
+                                    <MediaAttachmentFields
+                                        editing=true
+                                        chosen_image_url=chosen_image_url
+                                        audio_input=audio_input
+                                        video_input=video_input
+                                        has_image=detail.image_url.is_some()
+                                        has_audio=detail.audio_url.is_some()
+                                        has_video=detail.video_url.is_some()
+                                        has_youtube=detail.youtube_url.is_some()
+                                    />
                                     <label>
                                         "Target-language word/phrase"
                                         <input
@@ -850,8 +948,9 @@ fn EditCardPage() -> impl IntoView {
                         let deck_section = {
                             let deck_ids = deck_ids.clone();
                             view! {
-                                <h2>"Decks"</h2>
-                                <Transition fallback=|| view! { <p>"Loading decks…"</p> }>
+                                <div class="card-section">
+                                    <p class="card-section-heading">"Decks"</p>
+                                    <Transition fallback=|| view! { <p>"Loading decks…"</p> }>
                                     {move || {
                                         let deck_ids = deck_ids.clone();
                                         Suspend::new(async move {
@@ -896,15 +995,22 @@ fn EditCardPage() -> impl IntoView {
                                             }
                                         })
                                     }}
-                                </Transition>
+                                    </Transition>
+                                </div>
                             }
                         };
                         let delete_form = signed_in.then(|| {
+                            let armed = RwSignal::new(false);
                             view! {
                                 <ActionForm action=delete>
                                     <input type="hidden" name="card_id" value=id.to_string() />
-                                    <button type="submit">"Delete card"</button>
+                                    {confirm_button("Delete card", armed)}
                                 </ActionForm>
+                                {move || {
+                                    delete.value().get().and_then(Result::err).map(|e| {
+                                        view! { <p>"Error: " {e.to_string()}</p> }
+                                    })
+                                }}
                             }
                         });
                         let sign_in_prompt = (!signed_in).then(|| {
@@ -952,6 +1058,9 @@ fn DecksPage() -> impl IntoView {
 
     view! {
         <h1>"Decks"</h1>
+        <p class="page-intro">
+            "Group cards for focused review — a deck's cards show up in Review and in the card list's deck filter."
+        </p>
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
                 let signed_in = auth.await.ok().flatten().is_some();
@@ -961,6 +1070,11 @@ fn DecksPage() -> impl IntoView {
                             <label>"New deck name" <input type="text" name="name" /></label>
                             <button type="submit">"Create"</button>
                         </ActionForm>
+                        {move || {
+                            create.value().get().and_then(Result::err).map(|e| {
+                                view! { <p>"Error: " {e.to_string()}</p> }
+                            })
+                        }}
                     }
                 });
                 match decks.await {
@@ -977,6 +1091,7 @@ fn DecksPage() -> impl IntoView {
                                     let deck_id = deck.id;
                                     let name_value = deck.name.clone();
                                     let manage = signed_in.then(|| {
+                                        let delete_armed = RwSignal::new(false);
                                         view! {
                                             <div class="manage">
                                                 <ActionForm action=rename>
@@ -986,7 +1101,7 @@ fn DecksPage() -> impl IntoView {
                                                 </ActionForm>
                                                 <ActionForm action=delete>
                                                     <input type="hidden" name="deck_id" value=deck_id.to_string() />
-                                                    <button type="submit">"Delete"</button>
+                                                    {confirm_button("Delete", delete_armed)}
                                                 </ActionForm>
                                             </div>
                                         }
@@ -1001,6 +1116,20 @@ fn DecksPage() -> impl IntoView {
                                 })
                                 .collect_view()}
                         </ul>
+                        // rename/delete are one ServerAction shared across every
+                        // row's form, so their feedback is page-level, not
+                        // per-row — correct given today's layout, worth
+                        // revisiting if Phase B gives each row its own action.
+                        {move || {
+                            rename.value().get().and_then(Result::err).map(|e| {
+                                view! { <p>"Error renaming deck: " {e.to_string()}</p> }
+                            })
+                        }}
+                        {move || {
+                            delete.value().get().and_then(Result::err).map(|e| {
+                                view! { <p>"Error deleting deck: " {e.to_string()}</p> }
+                            })
+                        }}
                     }
                     .into_any(),
                     Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
@@ -1027,7 +1156,7 @@ fn ReviewPage() -> impl IntoView {
         <h1>"Review"</h1>
         <div>
             <label>
-                "Deck "
+                "Filter by deck "
                 <select on:change=move |ev| {
                     let value = event_target_value(&ev);
                     deck_filter.set(Uuid::parse_str(&value).ok());
@@ -1200,6 +1329,7 @@ fn SettingsPage() -> impl IntoView {
 
     view! {
         <h1>"Settings"</h1>
+        <p class="page-intro">"Tune how your own review sessions pace themselves."</p>
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || Suspend::new(async move {
                 if auth.await.ok().flatten().is_none() {
@@ -1219,6 +1349,12 @@ fn SettingsPage() -> impl IntoView {
                         </label>
                         <button type="submit">"Save"</button>
                     </ActionForm>
+                    {move || {
+                        set_limit.value().get().map(|result| match result {
+                            Ok(()) => view! { <p>"Saved."</p> }.into_any(),
+                            Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
+                        })
+                    }}
                 }
                 .into_any()
             })}
@@ -1268,8 +1404,9 @@ fn AccountPage() -> impl IntoView {
                         <button type="submit">"Save"</button>
                     </ActionForm>
                     {move || {
-                        update_name.value().get().and_then(Result::err).map(|e| {
-                            view! { <p>"Error: " {e.to_string()}</p> }
+                        update_name.value().get().map(|result| match result {
+                            Ok(()) => view! { <p>"Saved."</p> }.into_any(),
+                            Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
                         })
                     }}
 
@@ -1286,8 +1423,9 @@ fn AccountPage() -> impl IntoView {
                         <button type="submit">"Save"</button>
                     </ActionForm>
                     {move || {
-                        update_email.value().get().and_then(Result::err).map(|e| {
-                            view! { <p>"Error: " {e.to_string()}</p> }
+                        update_email.value().get().map(|result| match result {
+                            Ok(()) => view! { <p>"Saved. Sign in with your new email next time."</p> }.into_any(),
+                            Err(e) => view! { <p>"Error: " {e.to_string()}</p> }.into_any(),
                         })
                     }}
 
