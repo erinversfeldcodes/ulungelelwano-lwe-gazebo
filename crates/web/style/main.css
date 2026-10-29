@@ -98,7 +98,7 @@ h2 {
     margin-top: 1.8rem;
 }
 
-p, label {
+p, label, .word-display {
     color: var(--paper-aged);
 }
 
@@ -368,7 +368,7 @@ select {
     margin-top: 0.6rem;
 }
 
-.review-card details p {
+.review-card details .word-display {
     font-family: var(--font-type);
     font-size: 1.2rem;
     color: var(--ink);

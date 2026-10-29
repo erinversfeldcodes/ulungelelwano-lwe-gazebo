@@ -113,6 +113,28 @@ jobs:
         with:
           node-version: 22
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      # Confirmed via Neon's own operations log, twice now: the branch's
+      # compute suspends on its idle timeout (~5 minutes, and Free-plan
+      # projects can't change that — see the now-removed attempt to via
+      # the endpoint API) well before this job's build-and-deploy finishes,
+      # and the very first connection after that suspend fails outright on
+      # "password authentication failed" — not a brief blip: a 6-attempt,
+      # 30-second retry loop in the app itself (see
+      # main.rs::connect_with_retry) still exhausted every attempt against
+      # it. No start_compute operation is ever recorded for those failed
+      # attempts either, meaning Neon's proxy rejects them on a stale
+      # cached credential before ever waking the compute. Since we can't
+      # disable scale-to-zero, the only lever left is never letting it go
+      # idle long enough to suspend in the first place — a background
+      # ping every 60s for the rest of this job keeps it comfortably under
+      # that 5-minute threshold. Started before anything else so it's
+      # already running by the time the build (the slowest part) begins.
+      - name: Keep the Neon branch's compute awake for the rest of this job
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          url="postgresql://neondb_owner:${{ needs.neon-branch.outputs.db_password }}@${{ needs.neon-branch.outputs.db_host }}/neondb?sslmode=require"
+          ( while true; do psql "$url" -c "select 1" >/dev/null 2>&1; sleep 60; done ) &
+          disown
       - name: Fork a per-PR image bucket and scope a key to it
         id: storage
         env:

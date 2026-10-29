@@ -716,7 +716,7 @@ fn EditCardPage() -> impl IntoView {
                             let target_text = detail.target_text.clone();
                             let tags_display = detail.tags.join(", ");
                             view! {
-                                <p><ClickableWord text=target_text /></p>
+                                <div class="word-display"><ClickableWord text=target_text /></div>
                                 {(!detail.tags.is_empty())
                                     .then(|| view! { <p>"Tags: " {tags_display}</p> })}
                             }
@@ -1093,12 +1093,12 @@ fn ReviewPage() -> impl IntoView {
                                         {media_view}
                                         <details>
                                             <summary>"Reveal"</summary>
-                                            <p><ClickableWord text=card.target_text /></p>
+                                            <div class="word-display"><ClickableWord text=card.target_text /></div>
                                         </details>
                                     }
                                     .into_any(),
                                     DirectionInput::Reverse => view! {
-                                        <p><ClickableWord text=card.target_text /></p>
+                                        <div class="word-display"><ClickableWord text=card.target_text /></div>
                                         <details>
                                             <summary>"Reveal"</summary>
                                             {media_view}
