@@ -75,15 +75,78 @@ nav a {
     padding-bottom: 2px;
 }
 
+/* Deliberately not the same treatment as aria-current below — sharing a
+   color made the hovered link and the actual current page indistinguishable
+   at a glance, which read as two things being "active" at once. */
 nav a:hover {
-    color: var(--brass-bright);
     text-decoration: underline;
+    text-decoration-color: var(--brass-bright);
 }
 
 /* Set automatically by <A> on whichever link matches the current route. */
 nav a[aria-current="page"] {
     color: var(--brass-bright);
     border-bottom-color: var(--brass-bright);
+}
+
+/* --- Nav dropdowns ("Add", "Account"): grouping secondary links behind a
+   disclosure instead of 9 flat top-level items — the same
+   <details>/<summary> pattern used everywhere else in this app (Reveal,
+   dictionary details), not a new interaction model. --- */
+
+.nav-menu {
+    display: inline-block;
+    position: relative;
+}
+
+.nav-menu summary {
+    display: inline;
+    cursor: pointer;
+    color: var(--paper);
+    font-weight: bold;
+    list-style: none;
+}
+
+.nav-menu summary::-webkit-details-marker {
+    display: none;
+}
+
+.nav-menu summary::after {
+    content: " \25BE";
+    font-size: 0.7em;
+}
+
+.nav-menu summary:hover {
+    text-decoration: underline;
+    text-decoration-color: var(--brass-bright);
+}
+
+.nav-menu[open] summary {
+    color: var(--brass-bright);
+}
+
+.nav-menu-items {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 0.6rem;
+    background: var(--wood-dark);
+    border: 1px solid var(--brass-dim);
+    border-radius: 2px;
+    box-shadow: 0 6px 14px var(--shadow);
+    padding: 0.5rem 0;
+    min-width: 9rem;
+    display: flex;
+    flex-direction: column;
+    text-transform: none;
+    letter-spacing: normal;
+    z-index: 10;
+}
+
+.nav-menu-items a {
+    padding: 0.4rem 1rem;
+    white-space: nowrap;
+    border-bottom: none;
 }
 
 main {
@@ -625,9 +688,10 @@ select {
 /* --- Narrow viewports: the grids (.card-grid, .deck-cabinet) already
    collapse on their own via auto-fill/minmax, and form/.ledger/.review-card
    are max-width (not width), so they already shrink to fit. What's left is
-   the nav — nine uppercase, letter-spaced items with no wrap handling —
-   and main's fixed side padding eating more of a phone-width viewport than
-   it should. --- */
+   the nav — uppercase, letter-spaced items with no wrap handling (grouped
+   into "Add"/"Account" menus since, but still as many top-level targets
+   as a phone-width line comfortably holds) — and main's fixed side padding
+   eating more of a phone-width viewport than it should. --- */
 @media (max-width: 640px) {
     nav {
         padding: 0.7rem 1rem;
