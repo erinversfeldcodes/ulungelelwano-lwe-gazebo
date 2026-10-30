@@ -296,20 +296,42 @@ pub fn App() -> impl IntoView {
 
         <Router>
             <nav>
+                // Grouped by purpose rather than 9 flat links: content you
+                // browse stays flat and always visible (including signed
+                // out, since all three are public-read); creating a card
+                // and account/admin actions each collapse into their own
+                // <details> menu, the same disclosure pattern used
+                // everywhere else in this app (Reveal, dictionary details)
+                // rather than a new interaction model. Also makes room for
+                // Grammar without the nav growing past this.
                 <A href="/" exact=true>"Cards"</A>
                 " · "
                 <A href="/decks">"Decks"</A>
+                " · "
+                <A href="/wiki">"Grammar"</A>
                 <Transition fallback=|| ()>
                     {move || Suspend::new(async move {
                         match auth.await.ok().flatten() {
                             Some(_) => view! {
-                                " · "<A href="/new">"Add a card"</A>
-                                " · "<A href="/bulk-add">"Bulk add"</A>
                                 " · "<A href="/review">"Review"</A>
-                                " · "<A href="/stats">"Stats"</A>
-                                " · "<A href="/settings">"Settings"</A>
-                                " · "<A href="/account">"Account"</A>
-                                " · "<a href="/auth/logout">"Sign out"</a>
+                                " · "
+                                <details class="nav-menu">
+                                    <summary>"Add"</summary>
+                                    <div class="nav-menu-items">
+                                        <A href="/new">"Add a card"</A>
+                                        <A href="/bulk-add">"Bulk add"</A>
+                                    </div>
+                                </details>
+                                " · "
+                                <details class="nav-menu">
+                                    <summary>"Account"</summary>
+                                    <div class="nav-menu-items">
+                                        <A href="/stats">"Stats"</A>
+                                        <A href="/settings">"Settings"</A>
+                                        <A href="/account">"Account"</A>
+                                        <a href="/auth/logout">"Sign out"</a>
+                                    </div>
+                                </details>
                             }.into_any(),
                             None => view! {
                                 " · "<A href="/login">"Sign in"</A>

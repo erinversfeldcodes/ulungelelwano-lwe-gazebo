@@ -975,6 +975,277 @@ pub async fn upsert_word_definition(
     Ok(word_id)
 }
 
+// --- wiki pages -------------------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PageRow {
+    pub id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub slug: String,
+    pub title: String,
+    pub position: i32,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PageContentRow {
+    pub id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub slug: String,
+    pub title: String,
+    pub content_json: String,
+    pub content_markdown: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PageRevisionRow {
+    pub id: Uuid,
+    pub author_id: Uuid,
+    pub title: String,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PageRevisionContentRow {
+    pub title: String,
+    pub content_json: String,
+    pub content_markdown: String,
+}
+
+/// Whole tree in one query — no content, just enough for the sidebar.
+/// `parent_id NULLS FIRST` groups every root page together ahead of any
+/// children, `position` orders siblings (including the NULL-parent group)
+/// within that.
+pub async fn list_page_tree(pool: &PgPool) -> sqlx::Result<Vec<PageRow>> {
+    sqlx::query_as(
+        "SELECT id, parent_id, slug, title, position FROM pages \
+         ORDER BY parent_id NULLS FIRST, position",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn get_page(pool: &PgPool, page_id: Uuid) -> sqlx::Result<Option<PageContentRow>> {
+    sqlx::query_as(
+        "SELECT p.id, p.parent_id, p.slug, p.title, \
+                r.content_json::text AS content_json, r.content_markdown \
+         FROM pages p JOIN page_revisions r ON r.id = p.current_revision_id \
+         WHERE p.id = $1",
+    )
+    .bind(page_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Inserts the page and its first (empty) revision together, then points
+/// the page at it — the two tables reference each other, so this can't be
+/// done as a single INSERT; see the migration's comment on
+/// `current_revision_id`.
+pub async fn create_page(
+    pool: &PgPool,
+    created_by: Uuid,
+    parent_id: Option<Uuid>,
+    title: &str,
+    slug: &str,
+) -> sqlx::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    // IS NOT DISTINCT FROM, not `=`: a NULL parent_id (root-level pages)
+    // would never match plain `= $1` under SQL's three-valued logic.
+    let next_position: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM pages \
+         WHERE parent_id IS NOT DISTINCT FROM $1",
+    )
+    .bind(parent_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let page_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO pages (parent_id, slug, title, position, created_by) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(parent_id)
+    .bind(slug)
+    .bind(title)
+    .bind(next_position)
+    .bind(created_by)
+    .fetch_one(&mut *tx)
+    .await?;
+    let revision_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO page_revisions (page_id, author_id, title, content_json, content_markdown) \
+         VALUES ($1, $2, $3, '{}'::jsonb, '') RETURNING id",
+    )
+    .bind(page_id)
+    .bind(created_by)
+    .bind(title)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE pages SET current_revision_id = $1, search_text = $2 WHERE id = $3")
+        .bind(revision_id)
+        .bind(title)
+        .bind(page_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(page_id)
+}
+
+/// Always a new revision, never an edit in place — `pages.title` moves to
+/// match (it's the fast/denormalized "current" copy the tree listing reads,
+/// see `list_page_tree`), but every past title stays on its own revision row.
+pub async fn save_page_revision(
+    pool: &PgPool,
+    page_id: Uuid,
+    author_id: Uuid,
+    title: &str,
+    content_json: &str,
+    content_markdown: &str,
+) -> sqlx::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    let revision_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO page_revisions (page_id, author_id, title, content_json, content_markdown) \
+         VALUES ($1, $2, $3, $4::jsonb, $5) RETURNING id",
+    )
+    .bind(page_id)
+    .bind(author_id)
+    .bind(title)
+    .bind(content_json)
+    .bind(content_markdown)
+    .fetch_one(&mut *tx)
+    .await?;
+    // search_text is just title+markdown concatenated, not a tsvector
+    // itself — pages_search_idx builds that from it with to_tsvector at
+    // query/index time, so this stays a plain string with no FTS-specific
+    // handling here.
+    let search_text = format!("{title} {content_markdown}");
+    sqlx::query(
+        "UPDATE pages SET title = $1, current_revision_id = $2, search_text = $3 WHERE id = $4",
+    )
+    .bind(title)
+    .bind(revision_id)
+    .bind(&search_text)
+    .bind(page_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(revision_id)
+}
+
+pub async fn rename_page(
+    pool: &PgPool,
+    page_id: Uuid,
+    title: &str,
+    slug: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE pages SET title = $1, slug = $2 WHERE id = $3")
+        .bind(title)
+        .bind(slug)
+        .bind(page_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn move_page(
+    pool: &PgPool,
+    page_id: Uuid,
+    new_parent_id: Option<Uuid>,
+    new_position: i32,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE pages SET parent_id = $1, position = $2 WHERE id = $3")
+        .bind(new_parent_id)
+        .bind(new_position)
+        .bind(page_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn page_has_children(pool: &PgPool, page_id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pages WHERE parent_id = $1)")
+        .bind(page_id)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn delete_page(pool: &PgPool, page_id: Uuid) -> sqlx::Result<()> {
+    // Callers must check page_has_children first — a page with children
+    // isn't deletable (see wiki.rs's delete_page server fn). pages.id is
+    // referenced by current_revision_id's own FK target table, not the
+    // other way round, so no self-referential cleanup is needed here
+    // beyond what ON DELETE CASCADE already does for page_revisions/page_tags.
+    sqlx::query("DELETE FROM pages WHERE id = $1")
+        .bind(page_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_page_revisions(
+    pool: &PgPool,
+    page_id: Uuid,
+) -> sqlx::Result<Vec<PageRevisionRow>> {
+    sqlx::query_as(
+        "SELECT id, author_id, title, created_at FROM page_revisions \
+         WHERE page_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(page_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn get_revision(
+    pool: &PgPool,
+    revision_id: Uuid,
+) -> sqlx::Result<Option<PageRevisionContentRow>> {
+    sqlx::query_as(
+        "SELECT title, content_json::text, content_markdown \
+         FROM page_revisions WHERE id = $1",
+    )
+    .bind(revision_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// `content_markdown` of the revision immediately before `revision_id`, for
+/// diffing — `None` if `revision_id` is the page's first revision.
+pub async fn previous_revision_markdown(
+    pool: &PgPool,
+    page_id: Uuid,
+    revision_id: Uuid,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT content_markdown FROM page_revisions \
+         WHERE page_id = $1 AND created_at < (SELECT created_at FROM page_revisions WHERE id = $2) \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(page_id)
+    .bind(revision_id)
+    .fetch_optional(pool)
+    .await
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PageSearchRow {
+    pub id: Uuid,
+    pub slug: String,
+    pub title: String,
+    /// A highlighted snippet around the match, built by `ts_headline` —
+    /// comes back with `<b>...</b>` already wrapping the matched terms.
+    pub snippet: String,
+}
+
+pub async fn search_pages(pool: &PgPool, query: &str) -> sqlx::Result<Vec<PageSearchRow>> {
+    sqlx::query_as(
+        "SELECT id, slug, title, \
+                ts_headline('english', search_text, plainto_tsquery('english', $1)) AS snippet \
+         FROM pages \
+         WHERE to_tsvector('english', search_text) @@ plainto_tsquery('english', $1) \
+         ORDER BY ts_rank(to_tsvector('english', search_text), plainto_tsquery('english', $1)) DESC \
+         LIMIT 20",
+    )
+    .bind(query)
+    .fetch_all(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
